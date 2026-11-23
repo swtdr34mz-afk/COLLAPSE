@@ -1,0 +1,39 @@
+# COLLAPSE follows: MIDI clock, START, CONTINUE, STOP in over USB; notes 36-41 play the instruments
+wait 2500
+expect playing 0
+midi FA 00 00
+wait 5
+expect playing 1
+# 120 BPM: a clock every 21 ms (24 a quarter); 6 clocks a step
+clock 1 21
+expect step 0
+clock 12 21
+expect step 2
+expect ext 1
+shot ext.png
+clock 48 21
+expect step 10
+midi FC 00 00
+wait 20
+expect playing 0
+# CONTINUE: on from where it stopped
+midi FB 00 00
+clock 1 21
+expect step 11
+clock 6 21
+expect step 12
+midi FC 00 00
+wait 20
+# PLAY still runs the internal clock
+wait 1000
+expect ext 0
+tap PLAY
+wait 300
+expect playing 1
+tap PLAY
+# a note plays an instrument
+expect hits >0
+midi 99 24 64
+wait 50
+midi 99 29 64
+wait 50

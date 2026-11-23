@@ -1,0 +1,9 @@
+{
+  "what": "A physics drum machine inspired by Anukari: six synthesized instruments on springs, every hit pushes the one struck and its neighbours to new sounds. MASS and CHAOS macros, glitch, dubstep, DnB and LXR sounds, eight patterns, 16 to 64 steps, MIDI clock in. A 90s media player skin.",
+  "author": "swtdr34mz",
+  "kinds": "drums",
+  "play": "https://swtdr34mz-afk.github.io/COLLAPSE/emu/",
+  "image": "site/img/screen-main.png",
+  "color": "#5DE8E0",
+  "sounds": "none"
+}
