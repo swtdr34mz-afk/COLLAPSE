@@ -39,6 +39,9 @@ static uint8_t set_dirty;
 static uint32_t dirty_at;
 
 static const uint8_t WK[16] = PLAT_WHITE_KEYS, BK[11] = PLAT_BLACK_KEYS;
+static const char *const PAD_SHORT[NPADS] = {"CLPS", "0-G", "HOLE", "FRZ", "RWND", "1/8", "1/16", "1/32", "TAPE",
+                                             "SWP", "DRFT", "AVAL", "UP", "DOWN", "BRK", "DROP", "GATE", "HALF",
+                                             "LOFI", "THRW", "STUT"};
 #define PT (set.pat[set.cur])            /* the pattern being edited */
 #define TR (PT.tr[set.sel])              /* the picked instrument's track */
 #define IN (INST[set.sel])
@@ -213,6 +216,8 @@ static struct {
     uint8_t page;
     uint8_t view;                        /* the page of steps shown: 0 = 1-16 .. 3 = 49-64 */
     uint8_t muted;
+    uint8_t perf;                        /* PERF mode (ARP): the white keys are the pads */
+    uint32_t pads;
     int8_t browse;                       /* PRESET turned: the pattern chosen (-1 none), when */
     uint32_t browse_at;
     int8_t mass_pos, chaos_pos;          /* (unused: the macros rest on their zones like the knobs) */
@@ -518,6 +523,12 @@ static void button(uint32_t i)
         ui.seq_t = plat_ms();
         ui.seq_used = 0;
         break;
+    case B_ARP:
+        ui.perf = (uint8_t)!ui.perf;
+        ui.pads = 0;
+        eng_pads(0);
+        app_say("PERFORM", ui.perf ? "PADS ON" : "PADS OFF");
+        break;
     case B_OCTDN:
     case B_OCTUP:
         if (len_steps() > 16) {
@@ -571,15 +582,34 @@ static void input(void)
 {
     uint32_t keys = plat_keys(), btn = plat_buttons(), i;
     int32_t e;
-    for (i = 0; i < 16u; i++) {
-        uint32_t bit = 1u << WK[i];
-        if ((keys & bit) && !(ui.keys & bit))
-            step_key(i);
+    if (ui.perf) {                       /* the pads: the white keys and the black keys 7-11, while held */
+        uint32_t pads = 0, on;
+        for (i = 0; i < 16u; i++)
+            if (keys >> WK[i] & 1u)
+                pads |= 1u << i;
+        for (i = 0; i < 5u; i++)
+            if (keys >> BK[NINST + i] & 1u)
+                pads |= 1u << (P_GATE + i);
+        on = pads & ~ui.pads;
+        for (i = 0; i < NPADS; i++)
+            if (on >> i & 1u)
+                app_say("PAD", PAD_NAME[i]);
+        if (pads != ui.pads) {
+            ui.pads = pads;
+            eng_pads(pads);
+            ui.redraw = 1;
+        }
+    } else {
+        for (i = 0; i < 16u; i++) {
+            uint32_t bit = 1u << WK[i];
+            if ((keys & bit) && !(ui.keys & bit))
+                step_key(i);
+        }
     }
-    for (i = 0; i < NINST; i++) {
+    for (i = 0; i < NINST; i++) {        /* the instruments (PERF mode: their mutes, as the LXR-02's) */
         uint32_t bit = 1u << BK[i];
         if ((keys & bit) && !(ui.keys & bit))
-            inst_key(i, btn);
+            inst_key(i, ui.perf ? (1u << B_SEQ) : btn);
     }
     for (i = 0; i < NB; i++)
         if ((btn >> i & 1u) && !(ui.btn >> i & 1u))
@@ -606,9 +636,16 @@ static void lights(void)
 {
     uint32_t lit = 0, mid = 0, dim = 0, i, btn = 0, dimb;
     int32_t s = eng_track_step(set.sel);
-    for (i = 0; i < 16u; i++) {          /* the steps shown: accents lit, hits half */
+    for (i = 0; i < 16u; i++) {          /* the steps shown: accents lit, hits half (PERF: the pads, held lit) */
         int32_t st = (int32_t)i + 16 * ui.view;
         uint32_t bit = 1u << WK[i];
+        if (ui.perf) {
+            if (ui.pads >> i & 1u)
+                lit |= bit;
+            else
+                dim |= bit;
+            continue;
+        }
         if (st >= len_steps())
             continue;
         if (step_on(&TR, st)) {
@@ -618,8 +655,15 @@ static void lights(void)
                 mid |= bit;
         }
     }
-    if (s >= 0 && (s >> 4) == ui.view)
+    if (!ui.perf && s >= 0 && (s >> 4) == ui.view)
         lit ^= 1u << WK[s & 15];
+    if (ui.perf)                         /* the live FX keys */
+        for (i = 0; i < 5u; i++) {
+            if (ui.pads >> (P_GATE + i) & 1u)
+                lit |= 1u << BK[NINST + i];
+            else
+                dim |= 1u << BK[NINST + i];
+        }
     for (i = 0; i < NINST; i++) {        /* the instruments: picked lit, a hit flashes, the others glow */
         uint32_t bit = 1u << BK[i];
         if (ui.muted >> i & 1u)
@@ -631,12 +675,14 @@ static void lights(void)
     }
     if (eng_playing())
         btn |= LED_PLAY_GREEN;
+    if (ui.perf)
+        btn |= 1u << B_ARP;
     {
         static const uint8_t PB[NPAGES] = {B_HOME, B_EDIT, B_FX, B_GLO};
         btn |= 1u << PB[ui.page];
     }
     dimb = (1u << B_PLAY) | (1u << B_REC) | (1u << B_SEQ) | (1u << B_FX) | (1u << B_HOME) | (1u << B_EDIT)
-           | (1u << B_GLO);
+           | (1u << B_GLO) | (1u << B_ARP);
     if (len_steps() > 16)
         dimb |= (1u << B_OCTDN) | (1u << B_OCTUP);
     plat_lights(btn | (ui.btn & ~(1u << B_PLAY)), lit, dimb, dim, 1);
@@ -913,7 +959,21 @@ static void draw_playlist(int32_t y, int32_t s)
         cv_text(8, y + 17, &FONT_XS, t, LCD_MID);
         cv_text(232 - text_w(&FONT_XS, "NEXT"), y + 17, &FONT_XS, "NEXT", LCD_HI);
     } else {
-        int32_t x = cv_text(8, y + 17, &FONT_XS, ui.page <= PG_ENGINE ? IN.name : PAGE_NAME[ui.page],
+        int32_t x;
+        if (ui.perf) {                   /* the live FX keys, lit while held */
+            int32_t fx = 8;
+            cv_text(fx, y + 17, &FONT_XS, "PERFORM", LCD_HI);
+            fx = 70;
+            for (i = P_GATE; i < NPADS; i++) {
+                int on = ui.pads >> i & 1u;
+                int32_t w = text_w(&FONT_XS, PAD_SHORT[i]) + 4;
+                cv_rect(fx, y + 17, w, 12, on ? LCD_HI : LCD_GRID);
+                cv_text(fx + 2, y + 17, &FONT_XS, PAD_SHORT[i], on ? LCD_BG : LCD_MID);
+                fx += w + 3;
+            }
+            goto steps;
+        }
+        x = cv_text(8, y + 17, &FONT_XS, ui.page <= PG_ENGINE ? IN.name : PAGE_NAME[ui.page],
                             ui.page <= PG_ENGINE ? IN.rgb : LCD_HI);
         if (ui.page == PG_ENGINE)
             x = cv_text(x + 6, y + 17, &FONT_XS, "ENGINE", LCD_HI);
@@ -929,6 +989,16 @@ static void draw_playlist(int32_t y, int32_t s)
         int_text((int32_t)plat_cpu_pct(), t + 4);
         text_cat(t, "%");
         cv_text(232 - text_w(&FONT_XS, t), y + 17, &FONT_XS, t, plat_cpu_pct() > 80u ? C_WHITE : LCD_LO);
+    }
+steps:
+    if (ui.perf) {                       /* PERF: the sixteen pads, held ones lit */
+        for (i = 0; i < 16; i++) {
+            int32_t x = 6 + (i % 8) * 29, yy = y + 30 + (i / 8) * 13;
+            int on = ui.pads >> i & 1u;
+            cv_rect(x, yy, 27, 12, on ? LCD_HI : LCD_GRID);
+            ctext(x + 14, yy, &FONT_XS, PAD_SHORT[i], on ? LCD_BG : LCD_MID);
+        }
+        return;
     }
     for (i = 0; i < 16; i++) {           /* the steps: accents full, hits half, the others' hits as dots */
         int32_t st = i + 16 * ui.view, x = 6 + i * 14 + (i / 4) * 1, yy = y + 32, mx = x + 1;
@@ -1153,6 +1223,10 @@ int app_expect(const char *what, int *got)
         *got = PT.bpm;
     else if (!strcmp(what, "length"))    /* the picked track's */
         *got = TR.len;
+    else if (!strcmp(what, "perf"))
+        *got = ui.perf;
+    else if (!strcmp(what, "pads"))
+        *got = (int)ui.pads;
     else if (!strcmp(what, "tstep"))
         *got = eng_track_step(set.sel);
     else if (!strcmp(what, "mass"))

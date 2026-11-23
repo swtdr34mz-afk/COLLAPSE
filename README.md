@@ -74,6 +74,30 @@ slot; **HOME held 1 s** puts a pattern back to its factory state.
 | 7 | FRACTURE | broken DnB | 170 | 26, 16, 22, 15, 17, 26 |
 | 8 | AVALANCHE | everything pushes everything | 140 | 16, 14, 12, 9, 11, 24 |
 
+## Performance (ARP)
+
+**ARP** turns PERF mode on: the white keys become 16 pads, active while held; the six instruments' keys become
+**mutes** (a press mutes, the next unmutes); the five black keys right of them are **live FX**, held.
+
+| Pad | | Pad | |
+| --- | --- | --- | --- |
+| 1 | **COLLAPSE**: the springs torn: everything struck and shoved at once, everything shakes everything, the pitch falls; let go, it springs back | 9 | **TAPE STOP**: slower and slower; let go, it is back |
+| 2 | **ZERO-G**: no mass: everything light, high, and every hit bounces | 10 | **SWEEP**: a low-pass closing over a bar, opening in a beat |
+| 3 | **BLACK HOLE**: all the mass: deeper, longer, dirtier | 11 | **DRIFT**: every hit off the grid |
+| 4 | **FREEZE**: the last sixteenth, round and round | 12 | **AVALANCHE**: CHAOS full, every hit bounces |
+| 5 | **REWIND**: backwards, faster and faster | 13 | **SHIFT UP**: time in the bodies twice as fast (an octave up) |
+| 6 | **REPEAT 1/8** | 14 | **SHIFT DOWN**: half as fast (an octave down) |
+| 7 | **REPEAT 1/16** | 15 | **BREAK**: no kick, no bass |
+| 8 | **REPEAT 1/32** | 16 | **DROP**: from the top, now, with a collapse |
+
+| Black key | Live FX (held) |
+| --- | --- |
+| 7 | GATE: chopped in thirty-seconds |
+| 8 | HALF TIME |
+| 9 | LO-FI: a quarter of the rate, 5 bits |
+| 10 | SPACE THROW: the room opened wide |
+| 11 | STUTTER: GLITCH full |
+
 ## MIDI in: COLLAPSE follows
 
 Over USB and the TRS jack: **MIDI clock** (24 a quarter), **START**, **CONTINUE** and **STOP**. While a clock comes in

@@ -65,3 +65,7 @@ const macro_t GENERAL_KNOB[4] = {
     {"DRIFT", 4, {0, 40, 85, 127}, {"GRID", "HUMAN", "LOOSE", "FREE"}},
     {"LENGTH", 6, {6, 11, 15, 31, 47, 63}, {"7", "12", "16", "32", "48", "64"}},
 };
+
+const char *const PAD_NAME[NPADS] = {"COLLAPSE", "ZERO-G", "BLACK HOLE", "FREEZE", "REWIND", "REPEAT 1/8", "REPEAT 1/16",
+                                     "REPEAT 1/32", "TAPE STOP", "SWEEP", "DRIFT", "AVALANCHE", "SHIFT UP", "SHIFT DOWN",
+                                     "BREAK", "DROP", "GATE", "HALF TIME", "LO-FI", "SPACE THROW", "STUTTER"};

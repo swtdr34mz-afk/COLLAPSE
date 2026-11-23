@@ -91,6 +91,11 @@ void eng_ext_bpm(float bpm);             /* the tempo heard in the clock (0: non
 int eng_ext(void);                       /* following a MIDI clock now */
 void eng_hit(int inst, float vel);       /* an instrument now (a key) */
 void eng_kick_web(void);                 /* every instrument shoved at once (the intro's collapse) */
+/* the performance pads (PERF mode, ARP: the white keys, and the black keys right of the instruments, held) */
+enum { P_COLLAPSE, P_ZEROG, P_BLACKHOLE, P_FREEZE, P_REWIND, P_REP8, P_REP16, P_REP32, P_TAPE, P_SWEEP, P_DRIFT,
+       P_AVALANCHE, P_UP, P_DOWN, P_BREAK, P_DROP, P_GATE, P_HALF, P_LOFI, P_THROW, P_STUTTER, NPADS };
+extern const char *const PAD_NAME[NPADS];
+void eng_pads(uint32_t held);            /* the pads held now (bit P_*) */
 void eng_panic(void);
 void eng_overload(void);                 /* the render ran late: for a second, the soft bounces and the grains go */
 /* for the screen */

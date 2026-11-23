@@ -1,0 +1,166 @@
+# COLLAPSE's performance mode: every pad held, recorded
+wait 2200
+tap PLAY
+wait 1500
+tap ARP
+expect perf 1
+wait 50
+wav pad0.wav
+key w0 down
+wait 700
+shot perform.png
+key w0 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad1.wav
+key w1 down
+wait 700
+key w1 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad2.wav
+key w2 down
+wait 700
+key w2 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad3.wav
+key w3 down
+wait 700
+key w3 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad4.wav
+key w4 down
+wait 700
+key w4 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad5.wav
+key w5 down
+wait 700
+key w5 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad6.wav
+key w6 down
+wait 700
+key w6 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad7.wav
+key w7 down
+wait 700
+key w7 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad8.wav
+key w8 down
+wait 700
+key w8 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad9.wav
+key w9 down
+wait 700
+key w9 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad10.wav
+key w10 down
+wait 700
+key w10 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad11.wav
+key w11 down
+wait 700
+key w11 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad12.wav
+key w12 down
+wait 700
+key w12 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad13.wav
+key w13 down
+wait 700
+key w13 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad14.wav
+key w14 down
+wait 700
+key w14 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav pad15.wav
+key w15 down
+wait 700
+key w15 up
+wait 400
+wavstop
+expect peak_db_min -40
+wav live0.wav
+key b6 down
+wait 600
+key b6 up
+wait 200
+wavstop
+expect peak_db_min -40
+wav live1.wav
+key b7 down
+wait 600
+key b7 up
+wait 200
+wavstop
+expect peak_db_min -40
+wav live2.wav
+key b8 down
+wait 600
+key b8 up
+wait 200
+wavstop
+expect peak_db_min -40
+wav live3.wav
+key b9 down
+wait 600
+key b9 up
+wait 200
+wavstop
+expect peak_db_min -40
+wav live4.wav
+key b10 down
+wait 600
+key b10 up
+wait 200
+wavstop
+expect peak_db_min -40
+# PERF mode: the instruments' keys are mutes
+tapkey b0
+wait 30
+expect muted 1
+tapkey b0
+wait 30
+expect muted 0
+tap ARP
+expect perf 0
+expect pads 0
+expect playing 1
