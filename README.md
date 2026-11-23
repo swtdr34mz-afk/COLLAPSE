@@ -71,8 +71,10 @@ The same button again goes back to SOUND.
 
 Played like a physics instrument, not a drum machine (an Anukari recording was the reference: no grid to speak of,
 hits in clusters, tones ringing into each other, the weight in the low mids). Few steps; the bounces fill in. PRESET
-turns through them; while playing, the next one takes over **on the next beat**, from its top. Edits stay in their
-slot; **HOME held 1 s** puts a pattern back to its factory state.
+turns through them; while playing, the next one takes over **on the next beat**, from its top. Every pattern starts
+from its **start state** when you switch to it: the factory sound, MUTATE at zero. Edits are live only, until
+**SAVE**: that makes the current sound the slot's new start state (**SAVE held + PRESET** copies it to another
+slot instead). **HOME held 1 s** puts a pattern back to its factory state.
 
 | # | Pattern | Character | BPM | Track lengths |
 | --- | --- | --- | --- | --- |
@@ -126,7 +128,8 @@ the first click is already heard. **HOME** puts all four back to clean.
 Over USB and the TRS jack: **MIDI clock** (24 a quarter), **START**, **CONTINUE** and **STOP**. While a clock comes in
 the display shows EXT SYNC and the steps follow it. Notes 36-41 (any channel) play the six instruments.
 
-Settings and the eight patterns save themselves a few seconds after the last change.
+The chosen pattern and instrument save themselves a few seconds after the last change; the patterns themselves only
+with SAVE.
 
 ## Building
 

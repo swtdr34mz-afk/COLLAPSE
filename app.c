@@ -48,7 +48,12 @@ static const uint8_t WK[16] = PLAT_WHITE_KEYS, BK[11] = PLAT_BLACK_KEYS;
 static const char *const PAD_SHORT[NPADS] = {"CLPS", "0-G", "HOLE", "FRZ", "RWND", "1/8", "1/16", "1/32", "TAPE",
                                              "SWP", "DRFT", "AVAL", "UP", "DOWN", "BRK", "DROP", "GATE", "HALF",
                                              "LOFI", "THRW", "STUT"};
-#define PT (set.pat[set.cur])            /* the pattern being edited */
+/* set.pat[] holds each slot's start state (factory, or what SAVE stored). What plays and gets
+ * edited is a working copy: switching patterns throws the edits away and starts the new one
+ * clean. Two copies, so the engine keeps reading the old one until the switch lands. */
+static pattern_t live[2];
+static uint8_t li;
+#define PT (live[li])                    /* the pattern being edited */
 #define TR (PT.tr[set.sel])              /* the picked instrument's track */
 #define IN (INST[set.sel])
 
@@ -602,11 +607,23 @@ static void pattern_browse(int32_t d)
     app_say("PATTERN", t);
 }
 
+static void mutate_clean(void)
+{
+    uint32_t k;
+    for (k = 0; k < 4u; k++) {
+        ui.mut[k] = 0;
+        eng_mutate((int)k, 0);
+    }
+}
+
 static void pattern_commit(void)
 {
     set.cur = (uint8_t)ui.browse;
     ui.browse = -1;
+    li ^= 1u;
+    live[li] = set.pat[set.cur];         /* every pattern starts from its start state */
     eng_bind_next(&PT);
+    mutate_clean();
     knobs_sync();
     dirty();
     ui.redraw = 1;
@@ -619,11 +636,8 @@ static void button(uint32_t i)
     case B_REC: ui.rec_t = plat_ms(); break;
     case B_HOME:
         if (ui.perf) {                   /* PERF: MUTATE back to clean */
-            uint32_t k;
-            for (k = 0; k < 4u; k++) {
-                ui.mut[k] = 0;
-                eng_mutate((int)k, 0);
-            }
+            mutate_clean();
+            knobs_sync();
             app_say("MUTATE", "CLEAN");
             break;
         }
@@ -682,6 +696,7 @@ static void held_buttons(uint32_t btn)
             settings_save();
             app_say("COPIED TO", t);
         } else {
+            set.pat[set.cur] = PT;       /* this becomes the pattern's start state */
             settings_save();
             app_say("SAVED", FACTORY[set.cur].name);
         }
@@ -703,6 +718,8 @@ static void held_buttons(uint32_t btn)
         else if (now - ui.home_t >= 1000u) {
             ui.home_t = 0;
             factory_load(set.cur);
+            PT = set.pat[set.cur];
+            mutate_clean();
             knobs_sync();
             dirty();
             app_say("RESET", FACTORY[set.cur].name);
@@ -1414,6 +1431,8 @@ void app_init(void)
     plat_cpu2_set(1);
     eng_init();
     settings_load();
+    li = 0;
+    live[0] = set.pat[set.cur];
     eng_bind(&PT);
     ui.browse = -1;
     ui.copy_to = -1;
@@ -1495,6 +1514,8 @@ void app_backup_hold(int on) { (void)on; }
 void app_backup_restored(void)
 {
     settings_load();
+    li = 0;
+    live[0] = set.pat[set.cur];
     eng_bind(&PT);
     knobs_sync();
     ui.redraw = 1;

@@ -184,3 +184,45 @@ tap ARP
 expect perf 0
 expect pads 0
 expect playing 1
+# switching patterns: every one starts from its start state, MUTATE clean, edits gone
+tap ARP
+expect perf 1
+turn K2 4
+wait 100
+expect mut2 32
+tap ARP
+turn SELECT 70
+wait 100
+expect mass >95
+turn PRESET 1
+wait 1500
+expect cur 1
+expect queued 0
+expect mut2 0
+expect mass 30
+turn PRESET -1
+wait 1500
+expect cur 0
+expect mass 40
+# SAVE: the edit becomes the pattern's start state
+turn SELECT 70
+wait 100
+tap SAVE
+wait 100
+turn PRESET 1
+wait 1500
+expect mass 30
+turn PRESET -1
+wait 1500
+expect mass >95
+# HOME held a second: back to the factory state
+press HOME
+wait 1200
+release HOME
+wait 50
+expect mass 40
+turn PRESET 1
+wait 1500
+turn PRESET -1
+wait 1500
+expect mass 40
