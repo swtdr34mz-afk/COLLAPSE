@@ -14,6 +14,8 @@
 
 #include "voices.c"
 
+#include "body.c"
+
 #include "web.c"
 
 /* =============================================================== the state === */
@@ -23,6 +25,7 @@ static pattern_t pat0;                   /* (until the app binds its own) */
 
 typedef struct {
     voice_t v[2];                        /* two voices: a new hit takes the other one, the old one fades */
+    kick_body_t kb;                      /* the KICK: a body, not voices */
     uint8_t next;
     float peak;                          /* the block's peak (the screen's) */
     uint32_t noise;
@@ -124,6 +127,12 @@ void eng_panic(void)
     uint32_t t;
     for (t = 0; t < NINST; t++)
         S[t].v[0].on = S[t].v[1].on = 0;
+    {
+        uint8_t *z = (uint8_t *)&S[I_KICK].kb;
+        uint32_t n;
+        for (n = 0; n < sizeof S[I_KICK].kb; n++)
+            z[n] = 0;
+    }
 }
 
 /* a hit queued at sample `at` of the block: its knobs now (as set, pushed by the web, moved by MASS), then its push */
@@ -328,6 +337,22 @@ static void render_inst(int t)
     inst_state_t *s = &S[t];
     float *out = ibuf[t], pk = 0.0f;
     uint32_t i, e = 0, n = blk_n;
+    if (t == I_KICK) {                   /* a body: every hit pushes it, it rings */
+        for (i = 0; i < n; i++) {
+            float y, a;
+            while (e < nev[t] && ev[t][e].at <= i) {
+                kick_body_hit(&s->kb, ev[t][e].p, ev[t][e].vel, &s->noise);
+                e++;
+            }
+            y = kick_body_sample(&s->kb);
+            a = fm_fabsf(y);
+            if (a > pk)
+                pk = a;
+            out[i] = y;
+        }
+        s->peak = pk;
+        return;
+    }
     for (i = 0; i < n; i++) {
         float y = 0.0f, a;
         while (e < nev[t] && ev[t][e].at <= i) {   /* a hit: the other voice, the old one fades in 4 ms */
