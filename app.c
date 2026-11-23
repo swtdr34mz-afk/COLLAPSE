@@ -22,7 +22,8 @@
  *   PLAY            start from step 1 / stop.   REC held 1 s: the picked instrument's steps cleared
  *   SAVE            saved now (it saves itself a few seconds after a change anyway); SAVE held + PRESET: a slot, and
  *                   on letting go the pattern is copied there
- *   ARP             PERF mode: the white keys are 16 pads, the instruments' keys mutes, black keys 7-11 live FX
+ *   ARP             PERF mode: the white keys are 16 pads, the instruments' keys mutes, black keys 7-11 live FX, and
+ *                   K1..K4 MUTATE the whole pattern live: ERODE, MORPH, ENTANGLE, RIPPLE (8 a detent; HOME: all clean)
  *   MIDI in (USB, TRS): clock, START, CONTINUE, STOP: COLLAPSE follows; notes 36-41 play the six instruments.
  *   Settings save themselves a few seconds after the last change. */
 #include "fastmath.h"
@@ -221,7 +222,8 @@ static struct {
     uint8_t page;
     uint8_t view;                        /* the page of steps shown: 0 = 1-16 .. 3 = 49-64 */
     uint8_t muted;
-    uint8_t perf;                        /* PERF mode (ARP): the white keys are the pads */
+    uint8_t perf;                        /* PERF mode (ARP): the white keys are the pads, the knobs MUTATE */
+    uint8_t mut[4];                      /* MUTATE's knobs (live: not kept) */
     uint32_t pads;
     int8_t browse;                       /* PRESET turned: the pattern chosen (-1 none), when */
     uint32_t browse_at;
@@ -300,6 +302,8 @@ void app_say(const char *a, const char *b)
  * LENGTH: the picked track's steps - 1) */
 static const macro_t *page_knob(int k)
 {
+    if (ui.perf)
+        return &MUTATE_KNOB[k];
     switch (ui.page) {
     case PG_ENGINE: return &ENGINE_KNOB[k];
     case PG_FX: return &MASTER_KNOB[k];
@@ -318,7 +322,10 @@ static uint8_t *page_byte(int k)
 }
 static int32_t knob_val(int k)
 {
-    int32_t v = *page_byte(k);
+    int32_t v;
+    if (ui.perf)
+        return ui.mut[k];
+    v = *page_byte(k);
     if (ui.page == PG_GENERAL && k == 0)
         return v - 60;
     if (ui.page == PG_GENERAL && k == 3)
@@ -340,7 +347,25 @@ static void knob_store(int k, int32_t v)
 }
 static int knob_shows_number(int k)      /* BPM and LENGTH show their number, not a zone name, between zones */
 {
-    return ui.page == PG_GENERAL && (k == 0 || k == 3);
+    return !ui.perf && ui.page == PG_GENERAL && (k == 0 || k == 3);
+}
+
+static void big_show(const char *what, const char *of, uint16_t col);
+
+/* MUTATE (PERF mode): 8 a detent, no rests: a click is heard, sixteen go end to end */
+static void mutate(int k, int32_t e)
+{
+    const macro_t *mc = &MUTATE_KNOB[k];
+    int32_t was = ui.mut[k], v = clamp(was + e * 8, 0, 127), zw = zone_near(mc, was), zv = zone_near(mc, v);
+    static const uint16_t COL[4] = {RGB(190, 255, 40), RGB(255, 50, 190), RGB(40, 240, 255), RGB(120, 70, 255)};
+    if (e > 0 && was == 0 && v < 8)
+        v = 8;
+    ui.mut[k] = (uint8_t)v;
+    ui.knob_at[k] = plat_ms();
+    eng_mutate(k, v);
+    ui.redraw = 1;
+    if (zv != zw || v == 0 || v == 127)
+        big_show(mc->zone[zv], mc->name, COL[k]);
 }
 
 static void knobs_sync(void)
@@ -376,10 +401,18 @@ static void big_show(const char *what, const char *of, uint16_t col)
 
 static void knob(int k, int32_t e)
 {
-    const macro_t *mc = page_knob(k);
-    int32_t p = clamp(ui.knob_pos[k] + accel(EN_K1 + k, e, 3, 6), 0, pos_max(mc)), v = val_of_pos(mc, p);
-    int32_t was = knob_val(k);
-    int za = zone_at(mc, v);
+    const macro_t *mc;
+    int32_t p, v, was;
+    int za;
+    if (ui.perf) {
+        mutate(k, e);
+        return;
+    }
+    mc = page_knob(k);
+    p = clamp(ui.knob_pos[k] + accel(EN_K1 + k, e, 3, 6), 0, pos_max(mc));
+    v = val_of_pos(mc, p);
+    was = knob_val(k);
+    za = zone_at(mc, v);
     ui.knob_pos[k] = p;
     ui.knob_at[k] = plat_ms();
     ui.redraw = 1;
@@ -517,6 +550,15 @@ static void button(uint32_t i)
     case B_PLAY: eng_play(!eng_playing()); ui.redraw = 1; break;
     case B_REC: ui.rec_t = plat_ms(); break;
     case B_HOME:
+        if (ui.perf) {                   /* PERF: MUTATE back to clean */
+            uint32_t k;
+            for (k = 0; k < 4u; k++) {
+                ui.mut[k] = 0;
+                eng_mutate((int)k, 0);
+            }
+            app_say("MUTATE", "CLEAN");
+            break;
+        }
         ui.home_t = plat_ms();
         if (ui.page != PG_SOUND)
             page_set(PG_SOUND);
@@ -536,7 +578,8 @@ static void button(uint32_t i)
         ui.perf = (uint8_t)!ui.perf;
         ui.pads = 0;
         eng_pads(0);
-        app_say("PERFORM", ui.perf ? "PADS ON" : "PADS OFF");
+        app_say("PERFORM", ui.perf ? "PADS + MUTATE" : "OFF");
+        knobs_sync();
         break;
     case B_OCTDN:
     case B_OCTUP:
@@ -1053,7 +1096,7 @@ static void draw_sliders(int32_t y)
 static void draw_knobs(int32_t y, uint32_t now)
 {
     int32_t k;
-    uint16_t col = ui.page <= PG_ENGINE ? IN.rgb : NEON;
+    uint16_t col = ui.perf ? MAGENTA : ui.page <= PG_ENGINE ? IN.rgb : NEON;
     grunge(0, y, 240, 44);
     for (k = 0; k < 4; k++) {
         const macro_t *mc = page_knob(k);
@@ -1126,7 +1169,7 @@ static void draw_playlist(int32_t y, int32_t s)
         int32_t x;
         if (ui.perf) {                   /* the live FX keys, lit while held */
             int32_t fx = 70;
-            cv_text(8, y + 17, &FONT_XS, "PERFORM", MAGENTA);
+            cv_text(8, y + 17, &FONT_XS, "MUTATE", MAGENTA);
             for (i = P_GATE; i < NPADS; i++) {
                 int on = ui.pads >> i & 1u;
                 int32_t w = text_w(&FONT_XS, PAD_SHORT[i]) + 4;
@@ -1409,6 +1452,8 @@ int app_expect(const char *what, int *got)
         *got = TR.len;
     else if (!strcmp(what, "perf"))
         *got = ui.perf;
+    else if (!strncmp(what, "mut", 3) && what[3] >= '1' && what[3] <= '4')
+        *got = ui.mut[what[3] - '1'];
     else if (!strcmp(what, "pads"))
         *got = (int)ui.pads;
     else if (!strcmp(what, "tstep"))

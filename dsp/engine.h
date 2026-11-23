@@ -96,6 +96,10 @@ enum { P_COLLAPSE, P_ZEROG, P_BLACKHOLE, P_FREEZE, P_REWIND, P_REP8, P_REP16, P_
        P_AVALANCHE, P_UP, P_DOWN, P_BREAK, P_DROP, P_GATE, P_HALF, P_LOFI, P_THROW, P_STUTTER, NPADS };
 extern const char *const PAD_NAME[NPADS];
 void eng_pads(uint32_t held);            /* the pads held now (bit P_*) */
+/* MUTATE (PERF mode's knobs): live transformations of the whole pattern, 0 .. 127 each */
+enum { MU_ERODE, MU_MORPH, MU_ENTANGLE, MU_RIPPLE };
+extern const macro_t MUTATE_KNOB[4];
+void eng_mutate(int k, int v);
 void eng_panic(void);
 void eng_overload(void);                 /* the render ran late: for a second, the soft bounces and the grains go */
 /* for the screen */

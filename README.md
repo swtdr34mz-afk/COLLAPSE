@@ -98,6 +98,18 @@ slot; **HOME held 1 s** puts a pattern back to its factory state.
 | 10 | SPACE THROW: the room opened wide |
 | 11 | STUTTER: GLITCH full |
 
+### MUTATE: the knobs in PERF mode
+
+In PERF mode the four knobs transform the whole pattern live. Each click moves 8 (sixteen clicks end to end, no rests):
+the first click is already heard. **HOME** puts all four back to clean.
+
+| Knob | MUTATE | What it does |
+| --- | --- | --- |
+| K1 | **ERODE**: INTACT, PITTED, CORRODED, EATEN | Acid eats holes in the pattern: hits go missing, the holes spread to their neighbours every bar, the hits next to a hole turn brittle (softer, late). Turned back, it heals |
+| K2 | **MORPH**: AS SET, TOY, GLASS, RUBBER, BRUTAL | All six sounds through four worlds: tiny and clean, sweet and ringing, bouncy and deep, dirty and heavy (with each world's pitch, room, drive and bounce) |
+| K3 | **ENTANGLE**: APART, PAIRS, ROTATE, SCATTER | The instruments trade bodies: the kick's pattern played on the bass string, the snare's on the perc ... then rotating, then any body at random. The rhythm stays, the kit changes |
+| K4 | **RIPPLE**: STILL, ECHO, WAVES, SWARM | Every hit runs through the web: the instruments tied to it echo it (on the grid, then off it), at the top the echoes echo |
+
 ## MIDI in: COLLAPSE follows
 
 Over USB and the TRS jack: **MIDI clock** (24 a quarter), **START**, **CONTINUE** and **STOP**. While a clock comes in

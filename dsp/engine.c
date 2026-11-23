@@ -128,6 +128,112 @@ static int32_t rep_start = -1, rep_len, half_start = -1;
 static uint8_t rep_twice;                /* REPEAT 1/32: each hit twice */
 static float pad_t[NPADS];               /* how long each has been held (samples) */
 void eng_pads(uint32_t held) { pads = held; }
+
+/* ----------------------------------------------------------------- MUTATE --- */
+static volatile uint8_t mut[4];          /* the knobs (the main loop's) */
+static uint8_t mut_was[4];
+void eng_mutate(int k, int v)
+{
+    if (k >= 0 && k < 4)
+        mut[k] = (uint8_t)clamp(v, 0, 127);
+}
+/* ERODE: per track, the steps the acid has eaten (bit s); it spreads each bar, heals when turned back */
+static uint32_t rot[NINST][2];
+static uint32_t mu_noise = 0x1B873593u;
+static inline float mrnd(void) { return 0.5f + 0.5f * white(&mu_noise); }
+static int rotten(int t, int32_t s) { return (rot[t][(s >> 5) & 1] >> (s & 31) & 1u) != 0; }
+static void rot_set(int t, int32_t s, int on)
+{
+    uint32_t b = 1u << (s & 31);
+    if (on)
+        rot[t][(s >> 5) & 1] |= b;
+    else
+        rot[t][(s >> 5) & 1] &= ~b;
+}
+/* the acid now: seeded at once when turned up (so a click is heard), spreading to the neighbours once a bar, healing
+ * when turned down */
+static void erode(int grow)
+{
+    float a = (float)mut[MU_ERODE] / 127.0f, seed = a > 0.0f ? 0.12f + 0.6f * a : 0.0f;   /* (a click eats at once) */
+    int t;
+    int32_t s;
+    for (t = 0; t < NINST; t++) {
+        int32_t len = PAT ? (PAT->tr[t].len >= 1u && PAT->tr[t].len <= 64u ? PAT->tr[t].len : 16) : 16;
+        uint32_t was[2] = {rot[t][0], rot[t][1]};
+        for (s = 0; s < len; s++) {
+            int r = (was[(s >> 5) & 1] >> (s & 31) & 1u) != 0;
+            if (r && mrnd() > 0.35f + 0.65f * a)   /* healing: less acid, more heals */
+                rot_set(t, s, 0);
+            else if (!r && mrnd() < seed)          /* new pits */
+                rot_set(t, s, 1);
+            else if (!r && grow) {                  /* the spread: a neighbour eaten */
+                int32_t l = (s + len - 1) % len, n = (s + 1) % len;
+                int nb = ((was[(l >> 5) & 1] >> (l & 31)) & 1u) || ((was[(n >> 5) & 1] >> (n & 31)) & 1u);
+                if (nb && mrnd() < a * 0.7f)
+                    rot_set(t, s, 1);
+            }
+        }
+        if (a <= 0.0f)
+            rot[t][0] = rot[t][1] = 0;
+    }
+}
+
+/* MORPH: four worlds the sounds go through, after the pattern's own: TOY, GLASS, RUBBER, BRUTAL (each instrument's
+ * four knobs there), and what else each world moves: the pitch (semitones), drive, room, bounce */
+static const uint8_t WORLD[4][NINST][4] = {
+    {{110, 10, 15, 0}, {120, 0, 10, 0}, {127, 5, 127, 0}, {127, 60, 5, 0}, {120, 20, 120, 0}, {127, 15, 0, 0}},    /* TOY */
+    {{80, 30, 110, 0}, {90, 0, 120, 0}, {90, 110, 127, 0}, {40, 85, 127, 0}, {90, 120, 127, 0}, {64, 120, 0, 0}},   /* GLASS */
+    {{20, 127, 60, 20}, {10, 10, 40, 30}, {20, 30, 64, 20}, {10, 30, 90, 0}, {15, 60, 50, 20}, {0, 60, 127, 60}},  /* RUBBER */
+    {{60, 120, 50, 127}, {40, 127, 60, 127}, {60, 50, 20, 127}, {80, 115, 40, 127}, {40, 50, 100, 127}, {0, 110, 96, 127}},   /* BRUTAL */
+};
+static const float W_SEMI[5] = {0.0f, 7.0f, 3.0f, -5.0f, -3.0f};
+static const float W_DRIVE[5] = {0.0f, 0.0f, 0.0f, 20.0f, 100.0f};
+static const float W_SPACE[5] = {0.0f, 0.0f, 70.0f, 15.0f, 0.0f};
+static const float W_BOUNCE[5] = {0.0f, 20.0f, 0.0f, 100.0f, 30.0f};
+static float morph_w(int *i)             /* the world's segment (0: as set -> TOY .. 3: RUBBER -> BRUTAL), how far */
+{
+    float m = (float)mut[MU_MORPH] * (4.0f / 127.0f);
+    int k = (int)m;
+    if (k > 3)
+        k = 3;
+    *i = k;
+    return m - (float)k;
+}
+static float morph_lerp(const float *tab)
+{
+    int i;
+    float f = morph_w(&i);
+    return tab[i] + f * (tab[i + 1] - tab[i]);
+}
+static void morph_knobs(int t, float *p)
+{
+    int i, k;
+    float f;
+    if (!mut[MU_MORPH])
+        return;
+    f = morph_w(&i);
+    for (k = 0; k < 4; k++) {
+        float a = i == 0 ? p[k] : (float)WORLD[i - 1][t][k], b = (float)WORLD[i][t][k];
+        p[k] = a + f * (b - a);
+    }
+}
+
+/* ENTANGLE: which body plays instrument t's hit: its own, its partner's (KICK-BASS, SNARE-PERC, HATS-GLITCH), the
+ * next one's, or any (by chance, more the further it is turned) */
+static const uint8_t PARTNER[NINST] = {I_BASS, I_PERC, I_GLITCH, I_HATS, I_SNARE, I_KICK};
+static int entangle(int t)
+{
+    float e = (float)mut[MU_ENTANGLE] / 127.0f, r = mrnd();
+    if (e <= 0.0f)
+        return t;
+    if (e < 0.25f)
+        return r < 0.3f + e * 2.8f ? PARTNER[t] : t;
+    if (e < 0.5f)
+        return r < (e - 0.25f) * 4.0f ? (t + 1) % NINST : PARTNER[t];
+    if (e < 0.85f)
+        return r < (e - 0.5f) * 2.8f ? (int)(mrnd() * (float)NINST) % NINST : (t + 1 + (int)(e * 4.0f)) % NINST;
+    return (int)(mrnd() * (float)NINST) % NINST;
+}
 static float sweep_x, gate_g = 1.0f;
 static uint32_t gate_n;
 static float gate_inv;                   /* 1 / a thirty-second, in samples */
@@ -173,6 +279,7 @@ static void push_ev(int t, uint32_t at, float vel)
     e->at = (uint16_t)at;
     e->vel = vel;
     web_knobs(t, PAT->tr[t].p, (int)g_mass, e->p);
+    morph_knobs(t, e->p);
     web_push(t, vel, (int)g_mass, (int)g_chaos);
     hits++;
 }
@@ -231,24 +338,48 @@ static void play_step(int32_t s, uint32_t at)
     for (t = 0; t < NINST; t++) {
         const track_t *tr = &PAT->tr[t];
         int32_t ts = s % trk_len(tr);
-        float vel, delay, c = fm_maxf((float)tr->fx[FX_CHAOS], g_fxchaos) / 127.0f;
+        float vel, delay, c = fm_maxf(fm_maxf((float)tr->fx[FX_CHAOS], g_fxchaos), morph_lerp(W_BOUNCE)) / 127.0f;
+        int b;
         if (!step_on(tr, ts) || (muted >> t & 1u) || (HELD(P_BREAK) && (t == I_KICK || t == I_BASS)))
             continue;
         vel = step_acc(tr, ts) ? 1.0f : 0.68f;
+        if (mut[MU_ERODE]) {             /* ERODE: eaten, or brittle next to a hole */
+            int32_t len = trk_len(tr);
+            if (rotten((int)t, ts))
+                continue;
+            if (rotten((int)t, (ts + 1) % len) || rotten((int)t, (ts + len - 1) % len))
+                vel *= 0.25f + 0.6f * mrnd();
+        }
+        b = entangle((int)t);            /* ENTANGLE: the body that plays it */
         delay = sb * 0.6f * dr * dr
                 * fm_clampf(0.35f * rnd01() + 0.65f * (fm_fabsf(wd[t][1]) + fm_fabsf(wd[t][2])) * (1.0f / 40.0f), 0.0f, 1.0f);
+        if (mut[MU_ERODE] && rotten((int)t, (ts + 1) % trk_len(tr)))
+            delay += sb * 0.3f * mrnd();   /* (brittle: a little late too) */
         if (delay < 1.0f)
-            push_ev((int)t, at, vel);
+            push_ev(b, at, vel);
         else
-            later((int)t, (float)at + delay, vel);
+            later(b, (float)at + delay, vel);
         if (rep_twice)                   /* REPEAT 1/32: again half a step on */
-            later((int)t, (float)at + delay + sb * 0.5f, vel * 0.8f);
+            later(b, (float)at + delay + sb * 0.5f, vel * 0.8f);
+        if (mut[MU_RIPPLE]) {            /* RIPPLE: the hit runs through the web, the tied ones echo it */
+            float r = (float)mut[MU_RIPPLE] / 127.0f;
+            uint32_t j;
+            for (j = 0; j < NINST; j++)
+                if ((int)j != b && wtie[b][j] > 0.0f && mrnd() < 0.5f + 0.5f * r) {
+                    float d = sb * (r < 0.5f ? (float)(1 + (int)(mrnd() * 3.0f)) * 0.5f   /* echoes on the grid */
+                                             : 0.3f + 2.2f * mrnd());                        /* waves: off it */
+                    later((int)j, (float)at + delay + d, vel * (0.5f + 0.4f * r) * fm_minf(wtie[b][j] * 1.4f, 1.0f));
+                    if (r > 0.6f)        /* SWARM: the echo echoes */
+                        later((int)((j + 1 + (uint32_t)(mrnd() * 4.0f)) % NINST), (float)at + delay + d * 1.8f,
+                              vel * 0.35f * r);
+                }
+        }
         if (c > 0.0f && rnd01() < c * c * 0.9f + 0.1f * c) {   /* a bounce: its first rebound, its fall */
-            bc_gap[t] = sb * (1.1f - 0.7f * mass) * (0.55f + 0.45f * rnd01());
-            bc_e[t] = 0.5f + 0.42f * c - 0.1f * mass;
-            bc_vel[t] = vel * (0.6f + 0.3f * c);
-            bc_wait[t] = delay + bc_gap[t];
-            waiting |= (uint8_t)(1u << t);
+            bc_gap[b] = sb * (1.1f - 0.7f * mass) * (0.55f + 0.45f * rnd01());
+            bc_e[b] = 0.5f + 0.42f * c - 0.1f * mass;
+            bc_vel[b] = vel * (0.6f + 0.3f * c);
+            bc_wait[b] = delay + bc_gap[b];
+            waiting |= (uint8_t)(1u << b);
         }
     }
 }
@@ -307,6 +438,7 @@ static void pads_block(uint32_t n)
     dil = CURVE(P_PITCH, PAT->pitch);
     fxc = 0.0f;
     cx = 1.0f;
+    dil += morph_lerp(W_SEMI);           /* MORPH's world: its pitch */
     if (HELD(P_ZEROG)) {
         mass = 0.0f;
         fxc = 110.0f;
@@ -365,6 +497,8 @@ static void glitch_maybe(uint32_t at)
 static void clock_step(uint32_t at)
 {
     glitch_maybe(at);
+    if (mut[MU_ERODE] && (step_pos & 15) == 0)   /* ERODE: the acid spreads, once a bar */
+        erode(1);
     if (pat_next && (step_pos & 3) == 0 && next_pattern())
         step_pos = 0;
     play_step(step_pos, at);
@@ -387,6 +521,10 @@ static void sequence(uint32_t n)
         hit_req = 0;
     }
     /* MIDI clock in: each clock counted at the top of the block (a 1 kHz tick and a 2.9 ms block: within ~3 ms) */
+    if (mut[MU_ERODE] != mut_was[MU_ERODE]) {   /* ERODE turned: the acid now, not at the next bar */
+        erode(0);
+        mut_was[MU_ERODE] = mut[MU_ERODE];
+    }
     if (ext_req >= 0) {
         if (ext_req == 0) {
             ext_run = 0;
@@ -493,7 +631,8 @@ static float gl[NINST], gr[NINST];
 
 static void master_block(void)
 {
-    float sp = (float)PAT->space / 127.0f, dr = (float)PAT->drive / 127.0f;
+    float sp = fm_minf((float)PAT->space + morph_lerp(W_SPACE), 127.0f) / 127.0f;
+    float dr = fm_minf((float)PAT->drive + morph_lerp(W_DRIVE), 127.0f) / 127.0f;
     uint32_t t;
     fx.fb = 0.62f + 0.3f * sp;
     fx.damp = 0.45f - 0.25f * sp;

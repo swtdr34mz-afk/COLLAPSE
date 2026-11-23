@@ -69,3 +69,11 @@ const macro_t GENERAL_KNOB[4] = {
 const char *const PAD_NAME[NPADS] = {"COLLAPSE", "ZERO-G", "BLACK HOLE", "FREEZE", "REWIND", "REPEAT 1/8", "REPEAT 1/16",
                                      "REPEAT 1/32", "TAPE STOP", "SWEEP", "DRIFT", "AVALANCHE", "SHIFT UP", "SHIFT DOWN",
                                      "BREAK", "DROP", "GATE", "HALF TIME", "LO-FI", "SPACE THROW", "STUTTER"};
+
+/* MUTATE: PERF mode's four knobs (8 a detent: no rests, the names are where the knob is) */
+const macro_t MUTATE_KNOB[4] = {
+    {"ERODE", 4, {0, 40, 80, 120}, {"INTACT", "PITTED", "CORRODED", "EATEN"}},
+    {"MORPH", 5, {0, 32, 64, 96, 127}, {"AS SET", "TOY", "GLASS", "RUBBER", "BRUTAL"}},
+    {"ENTANGLE", 4, {0, 32, 64, 112}, {"APART", "PAIRS", "ROTATE", "SCATTER"}},
+    {"RIPPLE", 4, {0, 40, 80, 120}, {"STILL", "ECHO", "WAVES", "SWARM"}},
+};

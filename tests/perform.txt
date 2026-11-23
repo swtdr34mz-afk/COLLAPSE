@@ -153,6 +153,26 @@ key b10 up
 wait 200
 wavstop
 expect peak_db_min -40
+# MUTATE: 8 a click; HOME: all clean
+turn K1 1
+wait 100
+expect mut1 8
+turn K2 4
+wait 100
+expect mut2 32
+shot mutate.png
+turn K3 2
+turn K4 16
+wait 100
+expect mut4 127
+wav mutate.wav
+wait 2000
+wavstop
+expect peak_db_min -40
+tap HOME
+wait 50
+expect mut1 0
+expect mut4 0
 # PERF mode: the instruments' keys are mutes
 tapkey b0
 wait 30
