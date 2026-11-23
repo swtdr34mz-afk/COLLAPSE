@@ -20,6 +20,9 @@
  *                   track has its own length (LENGTH on GENERAL: 1 .. 64), so tracks run against each other
  *   OCT- / OCT+     the page of steps shown (1-16 .. 49-64)
  *   PLAY            start from step 1 / stop.   REC held 1 s: the picked instrument's steps cleared
+ *   SAVE            saved now (it saves itself a few seconds after a change anyway); SAVE held + PRESET: a slot, and
+ *                   on letting go the pattern is copied there
+ *   ARP             PERF mode: the white keys are 16 pads, the instruments' keys mutes, black keys 7-11 live FX
  *   MIDI in (USB, TRS): clock, START, CONTINUE, STOP: COLLAPSE follows; notes 36-41 play the six instruments.
  *   Settings save themselves a few seconds after the last change. */
 #include "fastmath.h"
@@ -211,6 +214,8 @@ static struct {
     uint32_t knob_at[4];
     uint32_t keys, btn;
     uint32_t rec_t, home_t, seq_t;       /* when REC, HOME, SEQ went down (0: not, or used) */
+    uint8_t save_down;                   /* SAVE held */
+    int8_t copy_to;                      /* SAVE held + PRESET: the slot the pattern is copied to on release (-1 none) */
     uint8_t seq_used;
     uint32_t enc_at[NE];
     uint8_t page;
@@ -523,6 +528,10 @@ static void button(uint32_t i)
         ui.seq_t = plat_ms();
         ui.seq_used = 0;
         break;
+    case B_SAVE:
+        ui.save_down = 1;
+        ui.copy_to = -1;
+        break;
     case B_ARP:
         ui.perf = (uint8_t)!ui.perf;
         ui.pads = 0;
@@ -550,6 +559,20 @@ static void button(uint32_t i)
 static void held_buttons(uint32_t btn)
 {
     uint32_t now = plat_ms();
+    if (ui.save_down && !(btn >> B_SAVE & 1u)) {   /* SAVE let go: copied where PRESET chose, or saved now */
+        ui.save_down = 0;
+        if (ui.copy_to >= 0 && ui.copy_to != (int8_t)set.cur) {
+            char t[24];
+            set.pat[ui.copy_to] = PT;
+            two_digits(ui.copy_to + 1, t);
+            settings_save();
+            app_say("COPIED TO", t);
+        } else {
+            settings_save();
+            app_say("SAVED", FACTORY[set.cur].name);
+        }
+        ui.copy_to = -1;
+    }
     if (ui.rec_t) {                      /* REC held a second: the instrument's steps cleared */
         if (!(btn >> B_REC & 1u))
             ui.rec_t = 0;
@@ -622,8 +645,20 @@ static void input(void)
         macro_turn(0, e);
     if ((e = plat_enc(EN_ALGO)) != 0)
         macro_turn(1, e);
-    if ((e = plat_enc(EN_PRESET)) != 0)
-        pattern_browse(e);
+    if ((e = plat_enc(EN_PRESET)) != 0) {
+        if (ui.save_down) {              /* SAVE held: where to copy the pattern */
+            char t[24];
+            int32_t c = ui.copy_to >= 0 ? ui.copy_to : set.cur;
+            c = (c + (e > 0 ? 1 : NPATTERNS - 1)) % NPATTERNS;
+            ui.copy_to = (int8_t)c;
+            two_digits(c + 1, t);
+            text_cat(t, " ");
+            text_cat(t, FACTORY[c].name);
+            app_say("COPY TO", t);
+        } else {
+            pattern_browse(e);
+        }
+    }
     if (ui.browse >= 0 && plat_ms() - ui.browse_at > 700u)
         pattern_commit();
     if (keys != ui.keys || btn != ui.btn)
@@ -1265,6 +1300,7 @@ void app_init(void)
     settings_load();
     eng_bind(&PT);
     ui.browse = -1;
+    ui.copy_to = -1;
     knobs_sync();
 }
 

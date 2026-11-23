@@ -148,6 +148,13 @@ wait 1100
 release HOME
 expect length 24
 expect steps >0
+# SAVE held + PRESET: the pattern copied to the next slot (AVALANCHE, 8, to MARBLE RUN, 1)
+press SAVE
+turn PRESET 1
+wait 50
+release SAVE
+wait 50
+expect cur 7
 # the settings kept across a restart
 wait 4500
 expect dirty 0

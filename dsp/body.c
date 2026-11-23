@@ -254,7 +254,7 @@ static void hats_body_hit(hats_body_t *b, const float *p, float vel, uint32_t *n
     b->m_len = b->m_left = 3.0f;
     b->m_amp = 2.0f * 1.6f * vel / 3.0f;
     b->hp_a = onepole(3000.0f * t);
-    b->sizzle = 2.6f * (1.0f - 0.8f * metal);
+    b->sizzle = 2.6f * (1.0f - metal) * fm_sqrtf(1.0f - metal);   /* (RING: none left) */
     b->ring = 0.35f + 0.9f * metal;
     b->ns = *ns;
     b->drive = 1.0f + 9.0f * dirt * dirt;
