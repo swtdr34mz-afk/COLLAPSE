@@ -241,6 +241,14 @@ static void int_text(int32_t v, char *b)
     *b = 0;
 }
 
+static uint32_t text_len(const char *s)  /* (no libc strlen on the device) */
+{
+    uint32_t n = 0;
+    while (s[n])
+        n++;
+    return n;
+}
+
 static void two_digits(int32_t v, char *b)
 {
     b[0] = (char)('0' + (v / 10) % 10);
@@ -488,7 +496,7 @@ static void button(uint32_t i)
             ui.view = (uint8_t)clamp(v, 0, pages - 1);
             int_text(ui.view * 16 + 1, t);
             text_cat(t, "-");
-            int_text(ui.view * 16 + 16, t + strlen(t));
+            int_text(ui.view * 16 + 16, t + text_len(t));
             app_say("STEPS", t);
         } else {
             app_say("LENGTH", "16 STEPS");
@@ -875,9 +883,9 @@ static void draw_playlist(int32_t y, int32_t s)
         t[0] = 0;
         int_text(ui.view * 16 + 1, t);
         text_cat(t, "-");
-        int_text(ui.view * 16 + 16, t + strlen(t));
+        int_text(ui.view * 16 + 16, t + text_len(t));
         text_cat(t, " / ");
-        int_text(len_steps(), t + strlen(t));
+        int_text(len_steps(), t + text_len(t));
         cv_text(x + 8, y + 17, &FONT_XS, t, LCD_MID);
         t[0] = 0;
         text_cat(t, "CPU ");
