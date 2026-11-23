@@ -12,24 +12,27 @@
 
 #include "helpers.h"
 
-#include "voices.c"
-
 #include "body.c"
 
 #include "web.c"
+
+static void body_hit(int t, const float *p, float vel, uint32_t *ns);
 
 /* =============================================================== the state === */
 static const pattern_t *PAT;
 static volatile const pattern_t *pat_next;
 static pattern_t pat0;                   /* (until the app binds its own) */
 
-typedef struct {
-    voice_t v[2];                        /* two voices: a new hit takes the other one, the old one fades */
-    kick_body_t kb;                      /* KICK, SNARE, HATS: bodies, not voices */
-    snare_body_t sb;
-    hats_body_t hb;
-    uint8_t next;
-    float peak;                          /* the block's peak (the screen's) */
+typedef struct {                         /* an instrument: its body, the block's peak (the screen's), its noise */
+    union {
+        kick_body_t k;
+        snare_body_t s;
+        hats_body_t h;
+        glitch_body_t g;
+        perc_body_t p;
+        bass_body_t b;
+    } body;
+    float peak;
     uint32_t noise;
 } inst_state_t;
 static inst_state_t S[NINST];
@@ -128,10 +131,16 @@ void eng_panic(void)
 {
     uint32_t t;
     for (t = 0; t < NINST; t++)
-        S[t].v[0].on = S[t].v[1].on = 0;
-    zero(&S[I_KICK].kb, sizeof S[I_KICK].kb);
-    zero(&S[I_SNARE].sb, sizeof S[I_SNARE].sb);
-    zero(&S[I_HATS].hb, sizeof S[I_HATS].hb);
+    for (t = 0; t < NINST; t++) {        /* still, but tuned (another body may shake it before its first hit) */
+        float p[4] = {64.0f, 64.0f, 64.0f, 30.0f};
+        uint32_t ns = 1;
+        if (PAT)
+            for (ns = 0; ns < 4u; ns++)
+                p[ns] = (float)PAT->tr[t].p[ns];
+        zero(&S[t].body, sizeof S[t].body);
+        ns = 1;
+        body_hit((int)t, p, 0.0f, &ns);
+    }
 }
 
 /* a hit queued at sample `at` of the block: its knobs now (as set, pushed by the web, moved by MASS), then its push */
@@ -291,7 +300,7 @@ static inline float allpass(float *buf, uint32_t n, uint32_t *i, float x)
 
 static const float PAN[NINST] = {0.0f, 0.05f, 0.3f, -0.35f, 0.25f, 0.0f};
 static const float SEND[NINST] = {0.0f, 0.35f, 0.12f, 0.4f, 0.45f, 0.0f};
-static const float TRIM[NINST] = {0.95f, 0.75f, 0.42f, 0.5f, 0.6f, 0.62f};
+static const float TRIM[NINST] = {0.95f, 0.8f, 1.05f, 1.25f, 0.6f, 1.0f};
 static float gl[NINST], gr[NINST];
 
 static void master_block(void)
@@ -328,9 +337,8 @@ void eng_init(void)
     {                                    /* the bodies tuned before their first hit: another may shake them first */
         float p[4] = {64.0f, 64.0f, 64.0f, 30.0f};
         uint32_t ns = 1;
-        kick_body_hit(&S[I_KICK].kb, p, 0.0f, &ns);
-        snare_body_hit(&S[I_SNARE].sb, p, 0.0f, &ns);
-        hats_body_hit(&S[I_HATS].hb, p, 0.0f, &ns);
+        for (t = 0; t < NINST; t++)
+            body_hit((int)t, p, 0.0f, &ns);
     }
 }
 
@@ -339,62 +347,74 @@ static float ibuf[NINST][BLK_MAX];
 static uint32_t blk_n;
 static float couple;                     /* how hard the bodies shake each other (CHAOS) */
 
+static void body_hit(int t, const float *p, float vel, uint32_t *ns)
+{
+    inst_state_t *s = &S[t];
+    switch (t) {
+    case I_KICK: kick_body_hit(&s->body.k, p, vel, ns); break;
+    case I_SNARE: snare_body_hit(&s->body.s, p, vel, ns); break;
+    case I_HATS: hats_body_hit(&s->body.h, p, vel, ns); break;
+    case I_GLITCH: glitch_body_hit(&s->body.g, p, vel, ns); break;
+    case I_PERC: perc_body_hit(&s->body.p, p, vel, ns); break;
+    default: bass_body_hit(&s->body.b, p, vel, ns); break;
+    }
+}
+
+/* THE WEB AT THE SAMPLE RATE: each body is pushed by the sound of the bodies tied to it (CHAOS's topology: wtie),
+ * scaled by how easily it moves (SENS). A body rendered earlier on the same core pushes with this block's sound; the
+ * others (the other core, or later) with the last block's (2.9 ms later: a tie of a few milliseconds' delay). */
+static const float SENS[NINST] = {0.25f, 0.3f, 1.5f, 1.2f, 0.6f, 0.4f};
+static const uint8_t CORE_OF[NINST] = {0, 0, 0, 1, 1, 1};
+static const uint8_t ORDER[NINST] = {0, 1, 2, 4, 3, 5};   /* KICK first (both cores use it), then SNARE, HATS | PERC,
+                                                           * GLITCH, BASS */
+static float prevbuf[NINST][BLK_MAX];
+/* the pushes go one way only, from the kick outward: a body never pushes one that pushes it back (no loop: the web
+ * can shake as hard as CHAOS likes, it can never run away) */
+static const uint8_t RANK[NINST] = {0, 1, 3, 4, 2, 5};   /* KICK, SNARE, PERC, HATS, GLITCH, BASS */
+
 static void render_inst(int t)
 {
     inst_state_t *s = &S[t];
-    float *out = ibuf[t], pk = 0.0f;
-    uint32_t i, e = 0, n = blk_n;
-    if (t <= I_HATS) {                   /* a body: every hit pushes it, it rings; the one before it shakes it */
-        const float *from = t == I_SNARE ? ibuf[I_KICK] : ibuf[I_SNARE];
-        float c = t == I_KICK ? 0.0f : couple * (t == I_SNARE ? 0.3f : 1.5f);
-        for (i = 0; i < n; i++) {
-            float y, a, push = c * from[i];
-            while (e < nev[t] && ev[t][e].at <= i) {
-                if (t == I_KICK)
-                    kick_body_hit(&s->kb, ev[t][e].p, ev[t][e].vel, &s->noise);
-                else if (t == I_SNARE)
-                    snare_body_hit(&s->sb, ev[t][e].p, ev[t][e].vel, &s->noise);
-                else
-                    hats_body_hit(&s->hb, ev[t][e].p, ev[t][e].vel, &s->noise);
-                e++;
-            }
-            y = t == I_KICK ? kick_body_sample(&s->kb, push)
-                : t == I_SNARE ? snare_body_sample(&s->sb, push) : hats_body_sample(&s->hb, push);
-            a = fm_fabsf(y);
-            if (a > pk)
-                pk = a;
-            out[i] = y;
+    float *out = ibuf[t], pk = 0.0f, gain[NINST];
+    const float *src[NINST];
+    uint32_t i, e = 0, n = blk_n, ns = 0, a;
+    for (a = 0; a < NINST; a++)          /* who pushes it */
+        if (RANK[a] < RANK[t] && wtie[a][t] > 0.0f) {
+            int now = a == I_KICK || (CORE_OF[a] == CORE_OF[t] && ORDER[a] < ORDER[t]);
+            src[ns] = now ? ibuf[a] : prevbuf[a];
+            gain[ns++] = couple * SENS[t] * wtie[a][t];
         }
-        s->peak = pk;
-        return;
-    }
     for (i = 0; i < n; i++) {
-        float y = 0.0f, a;
-        while (e < nev[t] && ev[t][e].at <= i) {   /* a hit: the other voice, the old one fades in 4 ms */
-            voice_t *v = &s->v[s->next];
-            s->v[s->next ^ 1u].k_fade = coef(0.004f);
-            voice_start(t, v, ev[t][e].p, ev[t][e].vel);
-            s->next ^= 1u;
+        float y, m, push = 0.0f;
+        uint32_t j;
+        while (e < nev[t] && ev[t][e].at <= i) {
+            body_hit(t, ev[t][e].p, ev[t][e].vel, &s->noise);
             e++;
         }
-        if (s->v[0].on)
-            y += voice_sample(t, &s->v[0], &s->noise);
-        if (s->v[1].on)
-            y += voice_sample(t, &s->v[1], &s->noise);
-        a = fm_fabsf(y);
-        if (a > pk)
-            pk = a;
+        for (j = 0; j < ns; j++)
+            push += gain[j] * src[j][i];
+        switch (t) {
+        case I_KICK: y = kick_body_sample(&s->body.k, push); break;
+        case I_SNARE: y = snare_body_sample(&s->body.s, push); break;
+        case I_HATS: y = hats_body_sample(&s->body.h, push); break;
+        case I_GLITCH: y = glitch_body_sample(&s->body.g, push); break;
+        case I_PERC: y = perc_body_sample(&s->body.p, push); break;
+        default: y = bass_body_sample(&s->body.b, push); break;
+        }
+        m = fm_fabsf(y);
+        if (m > pk)
+            pk = m;
         out[i] = y;
     }
     s->peak = pk;
 }
 
-/* the second core's share: GLITCH, PERC, BASS (the first renders KICK, SNARE, HATS and the master) */
+/* the second core's share: PERC, GLITCH, BASS (the first renders KICK, SNARE, HATS and the master) */
 static void job_insts(uint32_t arg)
 {
     (void)arg;
-    render_inst(I_GLITCH);
     render_inst(I_PERC);
+    render_inst(I_GLITCH);
     render_inst(I_BASS);
 }
 
@@ -432,15 +452,20 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
         web_slam();
     }
     web_step((float)n / ENG_SR, PAT->mass, PAT->chaos);
-    couple = 0.0005f + 0.005f * (float)PAT->chaos / 127.0f;
+    {
+        float ch = (float)PAT->chaos / 127.0f;
+        couple = 0.0003f + 0.012f * ch * ch;   /* (gentle in the middle, wild at the top) */
+    }
     /* the instruments: half on the second core, half here; if it cannot, all here */
+    render_inst(I_KICK);                 /* (first: both cores' bodies hear it) */
     on2 = plat_cpu2_on() && plat_cpu2_run(job_insts, 0);
-    render_inst(I_KICK);
     render_inst(I_SNARE);
     render_inst(I_HATS);
     if (!on2 || plat_cpu2_wait() != 0)
         job_insts(0);
     for (t = 0; t < NINST; t++) {
+        for (i = 0; i < n; i++)          /* the next block's pushes from this one */
+            prevbuf[t][i] = ibuf[t][i];
         env_out[t] = S[t].peak > env_out[t] ? S[t].peak : env_out[t] * 0.85f;
         energy_out[t] = web_energy((int)t);
         for (k = 0; k < 4; k++)

@@ -18,8 +18,18 @@
  * each ringing on its own and scraping (rough contact: a little noise while they touch): the rattle.
  * The HATS: a metal plate, eight stiff masses at inharmonic pitches tied by springs that harden (cubic): the energy
  * of a hit spreads from mode to mode, a shimmer (ties that give way when stretched: the force stays bounded).
+ * The PERC: three masses tuned to a struck object's modes (wood, skin, metal, glass), tied loosely: an LXR's modal
+ * voice, built from springs.
+ * The BASS: a string, sixteen masses in a row between two fixed ends, plucked near one end; its tension rises with how
+ * far it is pulled (a hard pluck starts sharp and growls); the WOBBLE moves the pickup along the string in time.
+ * The GLITCH: a ball dropped on a small plate. It bounces, each bounce shorter than the last (an accelerating stutter);
+ * every impact strikes the plate (a click at the plate's pitch); at DATA each impact retunes the plate. When another
+ * body shakes the plate, the ball dances on it.
  * Part of dsp/engine.c (included there). */
 /* ============================================================ the bodies === */
+static float g_step;                     /* samples a step, now (the render's: the BASS's wobble follows it) */
+static inline float k01(float v) { return fm_clampf(v, 0.0f, 127.0f) * (1.0f / 127.0f); }
+
 #define KR 6                             /* a head's ring */
 
 typedef struct {
@@ -283,6 +293,228 @@ static inline float hats_body_sample(hats_body_t *b, float push)
         out = drive_clip((m * b->ring + n * b->sizzle) * 0.3f, b->drive) * b->makeup;
     }
     if (body_bad(out, b->x[0])) {
+        zero(b, sizeof *b);
+        return 0.0f;
+    }
+    return out;
+}
+
+/* ----------------------------------------------------------------- PERC --- */
+/* RESO's objects: the second and third modes over the first, how long it rings (x DECAY's) */
+static const bp_t P_R1[] = {{10, 2.30f}, {50, 1.59f}, {85, 2.76f}, {120, 3.90f}};
+static const bp_t P_R2[] = {{10, 4.10f}, {50, 2.14f}, {85, 5.40f}, {120, 6.80f}};
+static const bp_t P_RING[] = {{10, 0.35f}, {50, 0.7f}, {85, 1.2f}, {120, 1.6f}};
+
+typedef struct {
+    float x[3], v[3], k[3], d[3], kc;
+    float m_amp, m_len, m_left, m_pos;
+    float drive, makeup;
+} perc_body_t;
+
+static void perc_body_hit(perc_body_t *b, const float *p, float vel, uint32_t *ns)
+{
+    float tune = k01(p[0]), decay = k01(p[1]), dirt = k01(p[3]), f = 70.0f * fm_exp2f(tune * 5.0f);
+    float r[3], tau = (0.02f + 0.8f * decay * decay) * CURVE(P_RING, p[2]);
+    int i;
+    r[0] = 1.0f;
+    r[1] = CURVE(P_R1, p[2]);
+    r[2] = CURVE(P_R2, p[2]);
+    for (i = 0; i < 3; i++) {
+        float w = FM_TWO_PI * fm_minf(f * r[i], 8000.0f) / ENG_SR;
+        b->k[i] = w * w;
+        b->d[i] = fm_expf(-1.0f / (tau / fm_sqrtf(r[i]) * ENG_SR));   /* the higher modes die sooner */
+    }
+    b->kc = b->k[0] * 0.05f;
+    b->m_len = b->m_left = 2.0f + 30.0f * (1.0f - k01(p[2]));        /* glass: a hard little stick, wood: soft */
+    b->m_amp = 2.0f * 0.9f * vel / b->m_len;
+    b->m_pos = 0.3f + 0.5f * (0.5f + 0.5f * white(ns));
+    b->drive = 1.0f + 9.0f * dirt * dirt;
+    b->makeup = 1.0f / (1.0f + 0.85f * dirt);
+}
+
+static inline float perc_body_sample(perc_body_t *b, float push)
+{
+    float f[3], out;
+    int i;
+    for (i = 0; i < 3; i++)
+        f[i] = -b->k[i] * b->x[i];
+    f[0] -= b->kc * (b->x[0] - b->x[1]) - push;
+    f[1] += b->kc * (b->x[0] - b->x[1]) - b->kc * (b->x[1] - b->x[2]);
+    f[2] += b->kc * (b->x[1] - b->x[2]);
+    if (b->m_left > 0.0f) {
+        float ph = 1.0f - b->m_left / b->m_len, m = b->m_amp * (0.5f - 0.5f * fm_cosf(FM_TWO_PI * ph));
+        f[0] += m;
+        f[1] += m * b->m_pos;
+        f[2] += m * b->m_pos * 0.6f;
+        b->m_left -= 1.0f;
+    }
+    for (i = 0; i < 3; i++) {
+        b->v[i] = (b->v[i] + f[i]) * b->d[i];
+        b->x[i] += b->v[i];
+    }
+    out = drive_clip((b->v[0] + 0.7f * b->v[1] + 0.5f * b->v[2]) * 0.8f, b->drive) * b->makeup;
+    if (body_bad(out, b->x[0])) {
+        zero(b, sizeof *b);
+        return 0.0f;
+    }
+    return out;
+}
+
+/* ----------------------------------------------------------------- BASS --- */
+#define NS 16                            /* the string's masses */
+static const bp_t B_NOTE[] = {{0, 0.0f}, {32, 7.0f}, {64, 12.0f}, {96, 19.0f}, {127, 24.0f}};
+
+typedef struct {
+    float x[NS], v[NS];
+    float k, nl, d, dh;                  /* tension (w^2 between neighbours), its rise with the pull, damping, the
+                                          * highs' damping */
+    float m_amp, m_len, m_left;
+    int m_at;
+    float lfo_ph, lfo_steps, lfo_depth, mic;   /* the pickup: where, how far the wobble moves it */
+    float drive, makeup;
+} bass_body_t;
+
+static void bass_body_hit(bass_body_t *b, const float *p, float vel, uint32_t *ns)
+{
+    float semi = fm_floorf(CURVE(B_NOTE, p[0]) + 0.5f), decay = k01(p[1]), wo = k01(p[2]), dirt = k01(p[3]);
+    float f = 41.2034f * fm_exp2f(semi / 12.0f), w1 = FM_TWO_PI * f / ENG_SR, sk = w1 * (float)(NS + 1) / FM_PI;
+    (void)ns;
+    b->k = sk * sk;
+    b->nl = 0.3f + 2.5f * dirt;
+    b->d = fm_expf(-1.0f / ((0.15f + 3.5f * decay * decay) * ENG_SR));
+    b->dh = 0.0002f + 0.004f * (1.0f - dirt);   /* clean: the highs die fast (round); dirty: they ring (growl) */
+    b->m_at = 2;
+    b->m_len = b->m_left = 30.0f - 22.0f * dirt;
+    b->m_amp = 2.0f * 0.5f * vel / b->m_len;
+    b->lfo_depth = wo < 0.1f ? 0.0f : 0.3f + 0.7f * wo;
+    b->lfo_steps = wo < 0.37f ? 4.0f : wo < 0.63f ? 2.0f : wo < 0.88f ? 1.0f : 0.5f;
+    b->lfo_ph = 0.25f;
+    b->mic = (float)NS * 0.45f;
+    b->drive = 1.0f + 5.0f * dirt * dirt;
+    b->makeup = 1.0f / (1.0f + 0.6f * dirt);
+}
+
+static inline float bass_body_sample(bass_body_t *b, float push)
+{
+    float f[NS], e = 0.0f, k, prev = 0.0f, pos, out;
+    int i, j;
+    for (i = 0; i < NS - 1; i++) {       /* the pull: how far the string is stretched (~1 at a hard pluck) */
+        float d = b->x[i + 1] - b->x[i];
+        e += d * d;
+    }
+    e = (e + b->x[0] * b->x[0] + b->x[NS - 1] * b->x[NS - 1]) * b->k * (1.0f / NS) * 4.0f;
+    k = b->k * (1.0f + fm_minf(b->nl * e, 3.0f));
+    for (i = 0; i < NS; i++) {           /* each mass between its neighbours (the ends fixed) */
+        float next = i + 1 < NS ? b->x[i + 1] : 0.0f;
+        f[i] = k * (prev + next - 2.0f * b->x[i]);
+        prev = b->x[i];
+    }
+    f[NS / 2] += push;
+    if (b->m_left > 0.0f) {              /* the pluck */
+        float ph = 1.0f - b->m_left / b->m_len;
+        f[b->m_at] += b->m_amp * (0.5f - 0.5f * fm_cosf(FM_TWO_PI * ph));
+        b->m_left -= 1.0f;
+    }
+    prev = 0.0f;
+    for (i = 0; i < NS; i++) {           /* velocities, the highs damped by the string's bending */
+        float next = i + 1 < NS ? b->v[i + 1] : 0.0f, nv = (b->v[i] + f[i]) * b->d;
+        nv += b->dh * (prev + next - 2.0f * b->v[i]);
+        prev = b->v[i];
+        b->v[i] = nv;
+    }
+    for (i = 0; i < NS; i++)
+        b->x[i] += b->v[i];
+    /* the pickup: between two masses, moved along the string by the wobble, in time */
+    pos = b->mic;
+    if (b->lfo_depth > 0.0f) {
+        b->lfo_ph += 1.0f / (b->lfo_steps * fm_maxf(g_step, 1000.0f));
+        if (b->lfo_ph >= 1.0f)
+            b->lfo_ph -= 1.0f;
+        pos = 1.0f + ((float)NS * 0.5f - 1.0f) * (1.0f - b->lfo_depth * (0.5f + 0.5f * fm_sin_turns(b->lfo_ph)));
+    }
+    j = (int)pos;
+    pos -= (float)j;
+    out = b->v[j] + pos * (b->v[j + 1] - b->v[j]);
+    out = drive_clip(out * 2.2f, b->drive) * b->makeup;
+    if (body_bad(out, b->x[NS / 2])) {
+        zero(b, sizeof *b);
+        return 0.0f;
+    }
+    return out;
+}
+
+/* --------------------------------------------------------------- GLITCH --- */
+typedef struct {
+    float y, vy, g, e;                   /* the ball: height, speed, gravity, its bounce */
+    float x0, v0, x1, v1, k0, k1, kc, d0, d1;   /* the plate's two modes */
+    float data;                          /* DATA: each impact retunes the plate this far */
+    float k0_set;
+    float crush_hold, crush_q, crush_n, crush_s, makeup;
+    uint32_t ns;
+} glitch_body_t;
+
+#define GL_MB 0.3f                       /* the ball's mass (the plate's: 1) */
+
+static void glitch_body_hit(glitch_body_t *b, const float *p, float vel, uint32_t *ns)
+{
+    float rate = k01(p[0]), pitch = k01(p[1]), len = k01(p[2]), crush = k01(p[3]);
+    float ts = (0.003f + 0.07f * (1.0f - rate) * (1.0f - rate)) * ENG_SR, vimp = 0.4f + 1.0f * vel;
+    float f = 150.0f * fm_exp2f(pitch * 5.2f), w = FM_TWO_PI * fm_minf(f, 6000.0f) / ENG_SR;
+    float w1 = FM_TWO_PI * fm_minf(f * 2.71f, 9000.0f) / ENG_SR;
+    b->k0 = b->k0_set = w * w;
+    b->k1 = w1 * w1;
+    b->kc = b->k0 * 0.08f;
+    b->d0 = fm_expf(-1.0f / ((0.008f + 0.12f * len) * ENG_SR));
+    b->d1 = fm_expf(-1.0f / ((0.004f + 0.05f * len) * ENG_SR));
+    b->e = 0.45f + 0.5f * len;
+    b->g = vimp / ts;                    /* dropped from rest: it lands after ts samples at vimp */
+    if (vel > 0.0f) {
+        b->y = b->x0 + 0.5f * vimp * ts;
+        b->vy = 0.0f;
+    }
+    b->data = pitch > 0.75f ? (pitch - 0.75f) * 4.0f : 0.0f;
+    b->crush_hold = 1.0f + 10.0f * crush * crush;
+    b->crush_q = crush > 0.05f ? 96.0f - 88.0f * crush : 0.0f;
+    b->makeup = 1.0f / (1.0f + 0.5f * crush);
+    b->ns = *ns;
+}
+
+static inline float glitch_body_sample(glitch_body_t *b, float push)
+{
+    float f0 = -b->k0 * b->x0 - b->kc * (b->x0 - b->x1) + push, f1 = -b->k1 * b->x1 + b->kc * (b->x0 - b->x1), out;
+    b->v0 = (b->v0 + f0) * b->d0;
+    b->x0 += b->v0;
+    b->v1 = (b->v1 + f1) * b->d1;
+    b->x1 += b->v1;
+    if (b->g > 0.0f) {                   /* the ball */
+        b->vy -= b->g;
+        b->y += b->vy;
+        if (b->y <= b->x0) {
+            float vr = b->vy - b->v0;
+            b->y = b->x0;
+            if (vr < -0.02f) {           /* an impact: momentum shared, some of it bounced back (e) */
+                float j = -(1.0f + b->e) * vr / (1.0f / GL_MB + 1.0f);
+                b->vy += j / GL_MB;
+                b->v0 -= j;
+                if (b->data > 0.0f && vr < -0.06f)   /* DATA: the plate retuned at each real impact */
+                    b->k0 = b->k0_set * fm_exp2f(b->data * 2.0f * white(&b->ns));
+            } else {                     /* lying on the plate: carried along, silently (a plate shaken down faster
+                                          * than the ball falls throws it up again: it dances) */
+                b->vy = b->v0;
+            }
+        }
+    }
+    out = b->v0 + 0.6f * b->v1;
+    if (b->crush_q > 0.0f) {             /* CRUSH: fewer samples, fewer levels */
+        b->crush_n += 1.0f;
+        if (b->crush_n >= b->crush_hold) {
+            b->crush_n -= b->crush_hold;
+            b->crush_s = fm_floorf(out * b->crush_q + 0.5f) / b->crush_q;
+        }
+        out = b->crush_s;
+    }
+    out = drive_clip(out * 1.4f, 1.3f) * b->makeup;
+    if (body_bad(out, b->x0) || body_bad(out, b->y)) {
         zero(b, sizeof *b);
         return 0.0f;
     }
