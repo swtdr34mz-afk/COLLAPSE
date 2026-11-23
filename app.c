@@ -9,7 +9,9 @@
  *                   sequencer is stopped); SEQ held + a key: muted / back
  *   white keys      the picked instrument's 16 steps on the page shown: a tap turns a step on, again ACCENT, again off
  *   K1..K4          the page's four knobs; turned slowly each rests a few detents on its sweetspots. The pages:
- *                   HOME the instrument's SOUND, EDIT its ENGINE (FM, GRAIN, FILTER, CHAOS: its bounces), FX the
+ *                   HOME the instrument's SOUND, EDIT its ENGINE (FM, GRAIN, FILTER, CHAOS: its bounces), ENV its
+ *                   EXCITE (TYPE: mallet, pluck, bow, brush; HARDNESS, POSITION, BOUNCE), LFO its MOTION (RATE, DEPTH,
+ *                   SHAPE, TARGET), SEL the WEB (TENSION, DAMPING, REACH; the instrument's LINK), FX the
  *                   master's (DRIVE, SPACE, PITCH, GLITCH), GLO the GENERAL page (BPM, SWING, DRIFT, the track's
  *                   LENGTH). The same button again: back to SOUND
  *   SELECT          MASS: FEATHER .. BLACK HOLE (light and nervous .. heavy, slow and dirty)
@@ -29,7 +31,7 @@
 #include "fastmath.h"
 #include "engine.h"
 
-#define SET_MAGIC 0x32434F43u            /* "COC2": the settings record; another magic loads the factory patterns */
+#define SET_MAGIC 0x33434F43u            /* "COC3": the settings record; another magic loads the factory patterns */
 typedef struct {
     uint32_t magic;
     pattern_t pat[NPATTERNS];
@@ -64,6 +66,22 @@ static void set_step(track_t *t, int s, int on, int acc)
         t->acc[s >> 5] &= ~b;
 }
 
+/* what the factory patterns do with EXCITE and MOTION (255: as is) */
+typedef struct {
+    uint8_t pat, inst, exc[4], mot[4];
+} touch_t;
+static const touch_t FACTORY_TOUCH[] = {
+    {0, I_PERC, {255, 255, 255, 255}, {96, 40, 10, 10}},     /* MARBLE RUN: the perc's pitch drifts over 4 bars */
+    {1, I_PERC, {80, 70, 255, 255}, {255, 255, 255, 255}},   /* SPRING TANK: a bowed perc, singing */
+    {1, I_KICK, {255, 30, 255, 40}, {255, 255, 255, 255}},   /* (a soft, flamming kick) */
+    {3, I_BASS, {80, 64, 255, 255}, {127, 60, 10, 118}},     /* GRAVITY WELL: a bowed bass, its pitch over 16 bars */
+    {4, I_HATS, {42, 110, 255, 255}, {255, 255, 255, 255}},  /* CLOCKWORK: plucked hats */
+    {5, I_HATS, {116, 255, 255, 255}, {255, 255, 255, 255}}, /* RAIN ON TIN: brushed hats */
+    {5, I_GLITCH, {255, 255, 255, 255}, {32, 70, 80, 36}},   /* (the ball's pitch, at random) */
+    {6, I_SNARE, {255, 100, 255, 90}, {255, 255, 255, 255}}, /* FRACTURE: a hard, rattling snare */
+    {7, I_KICK, {255, 255, 255, 60}, {64, 50, 116, 10}},     /* AVALANCHE: the kick bounces, its tune hops */
+};
+
 static void factory_load(uint32_t i)     /* pattern slot i from its factory state */
 {
     const factory_t *f = &FACTORY[i];
@@ -89,6 +107,23 @@ static void factory_load(uint32_t i)     /* pattern slot i from its factory stat
         for (s = 0; s < NSTEPS && f->steps[t][s]; s++)
             set_step(tr, (int)s, f->steps[t][s] != '.', f->steps[t][s] == 'X');
         tr->len = (uint8_t)(s ? s : 16u);   /* the string's length is the track's */
+        tr->exc[EX_TYPE] = 10;           /* EXCITE, MOTION, LINK: as the body has it, still, tied */
+        tr->exc[EX_HARD] = tr->exc[EX_POS] = 64;
+        tr->mot[MO_RATE] = 64;
+        tr->mot[MO_SHAPE] = 10;
+        tr->mot[MO_TARGET] = 10;
+        tr->link = 64;
+    }
+    p->web[WB_TENSION] = p->web[WB_DAMPING] = p->web[WB_REACH] = 64;
+    for (k = 0; k < sizeof FACTORY_TOUCH / sizeof FACTORY_TOUCH[0]; k++) {   /* the patterns' own EXCITE, MOTION */
+        const touch_t *x = &FACTORY_TOUCH[k];
+        if (x->pat == i)
+            for (s = 0; s < 4u; s++) {
+                if (x->exc[s] != 255u)
+                    p->tr[x->inst].exc[s] = x->exc[s];
+                if (x->mot[s] != 255u)
+                    p->tr[x->inst].mot[s] = x->mot[s];
+            }
     }
 }
 
@@ -111,14 +146,18 @@ static int settings_ok(void)
     for (i = 0; i < NPATTERNS; i++) {
         const pattern_t *p = &set.pat[i];
         if (p->mass > 127u || p->chaos > 127u || p->bpm < 60u || p->bpm > 187u || p->swing > 127u
-            || p->drive > 127u || p->space > 127u || p->drift > 127u || p->pitch > 127u || p->glitch > 127u)
+            || p->drive > 127u || p->space > 127u || p->drift > 127u || p->pitch > 127u || p->glitch > 127u
+            || p->web[0] > 127u || p->web[1] > 127u || p->web[2] > 127u)
             return 0;
         for (t = 0; t < NINST; t++) {
             for (k = 0; k < 4u; k++)
                 if (p->tr[t].p[k] > 127u || p->tr[t].fx[k] > 127u)
                     return 0;
-            if (p->tr[t].level > 127u || p->tr[t].len < 1u || p->tr[t].len > 64u)
+            if (p->tr[t].level > 127u || p->tr[t].len < 1u || p->tr[t].len > 64u || p->tr[t].link > 127u)
                 return 0;
+            for (k = 0; k < 4u; k++)
+                if (p->tr[t].exc[k] > 127u || p->tr[t].mot[k] > 127u)
+                    return 0;
         }
     }
     return 1;
@@ -146,8 +185,9 @@ static void settings_save(void)
 /* A knob's position runs past each sweetspot REST detents more than its value: turned slowly, it rests on the zone for
  * those detents (a soft notch); turned fast, it runs past. */
 #define REST 5
-enum { PG_SOUND, PG_ENGINE, PG_FX, PG_GENERAL, NPAGES };
-static const char *const PAGE_NAME[NPAGES] = {"SOUND", "ENGINE", "FX", "GENERAL"};
+enum { PG_SOUND, PG_ENGINE, PG_EXCITE, PG_MOTION, PG_FX, PG_GENERAL, PG_WEB, NPAGES };
+static const char *const PAGE_NAME[NPAGES] = {"SOUND", "ENGINE", "EXCITE", "MOTION", "FX", "GENERAL", "WEB"};
+#define INST_PAGE(p) ((p) <= PG_MOTION)   /* the picked instrument's pages (the others: the pattern's) */
 
 static int32_t pos_max(const macro_t *mc) { return 127 + mc->nzones * REST; }
 
@@ -306,8 +346,11 @@ static const macro_t *page_knob(int k)
         return &MUTATE_KNOB[k];
     switch (ui.page) {
     case PG_ENGINE: return &ENGINE_KNOB[k];
+    case PG_EXCITE: return &EXCITE_KNOB[k];
+    case PG_MOTION: return &MOTION_KNOB[k];
     case PG_FX: return &MASTER_KNOB[k];
     case PG_GENERAL: return &GENERAL_KNOB[k];
+    case PG_WEB: return &WEB_KNOB[k];
     default: return &IN.knob[k];
     }
 }
@@ -315,6 +358,9 @@ static uint8_t *page_byte(int k)
 {
     switch (ui.page) {
     case PG_ENGINE: return &TR.fx[k];
+    case PG_EXCITE: return &TR.exc[k];
+    case PG_MOTION: return &TR.mot[k];
+    case PG_WEB: return k == WB_LINK ? &TR.link : &PT.web[k];
     case PG_FX: return k == 0 ? &PT.drive : k == 1 ? &PT.space : k == 2 ? &PT.pitch : &PT.glitch;
     case PG_GENERAL: return k == 0 ? &PT.bpm : k == 1 ? &PT.swing : k == 2 ? &PT.drift : &TR.len;
     default: return &TR.p[k];
@@ -351,6 +397,12 @@ static int knob_shows_number(int k)      /* BPM and LENGTH show their number, no
 }
 
 static void big_show(const char *what, const char *of, uint16_t col);
+
+/* a zone's name; MOTION's TARGET: the picked instrument's own knob names */
+static const char *zname(const macro_t *mc, int z)
+{
+    return mc->zone[z] ? mc->zone[z] : IN.knob[z].name;
+}
 
 /* MUTATE (PERF mode): 8 a detent, no rests: a click is heard, sixteen go end to end */
 static void mutate(int k, int32_t e)
@@ -399,6 +451,12 @@ static void big_show(const char *what, const char *of, uint16_t col)
         ann_say(what, 0, ANN_NOW);
 }
 
+/* a knob that chooses (EXCITE's TYPE, MOTION's SHAPE and TARGET): a click is the next choice */
+static int knob_chooses(int k)
+{
+    return (ui.page == PG_EXCITE && k == EX_TYPE) || (ui.page == PG_MOTION && (k == MO_SHAPE || k == MO_TARGET));
+}
+
 static void knob(int k, int32_t e)
 {
     const macro_t *mc;
@@ -409,6 +467,18 @@ static void knob(int k, int32_t e)
         return;
     }
     mc = page_knob(k);
+    if (knob_chooses(k)) {
+        int z = clamp(zone_near(mc, knob_val(k)) + (e > 0 ? 1 : -1), 0, mc->nzones - 1);
+        if (mc->centre[z] != knob_val(k)) {
+            knob_store(k, mc->centre[z]);
+            ui.knob_pos[k] = pos_of_val(mc, mc->centre[z]);
+            dirty();
+            big_show(zname(mc, z), mc->name, IN.rgb);
+        }
+        ui.knob_at[k] = plat_ms();
+        ui.redraw = 1;
+        return;
+    }
     p = clamp(ui.knob_pos[k] + accel(EN_K1 + k, e, 3, 6), 0, pos_max(mc));
     v = val_of_pos(mc, p);
     was = knob_val(k);
@@ -421,7 +491,7 @@ static void knob(int k, int32_t e)
     knob_store(k, v);
     dirty();
     if (za >= 0 && za != zone_at(mc, was))
-        big_show(mc->zone[za], mc->name, ui.page <= PG_ENGINE ? IN.rgb : RGB(93, 232, 224));
+        big_show(zname(mc, za), mc->name, INST_PAGE(ui.page) ? IN.rgb : RGB(93, 232, 224));
 }
 
 /* SELECT and ALGORITHM: the web's two macros, with sweetspots too */
@@ -446,12 +516,10 @@ static void macro_turn(int which, int32_t e)
 
 static void page_set(int pg)
 {
-    static const char *const WHAT[NPAGES] = {"", "FM GRAIN FILTER CHAOS", "DRIVE SPACE PITCH GLITCH",
-                                             "BPM SWING DRIFT LENGTH"};
     ui.page = (uint8_t)pg;
     ui.big_until = 0;
     knobs_sync();
-    app_say(pg <= PG_ENGINE ? IN.name : PAGE_NAME[pg], pg == PG_SOUND ? "SOUND" : WHAT[pg]);
+    app_say(INST_PAGE(pg) ? IN.name : PAGE_NAME[pg], INST_PAGE(pg) ? PAGE_NAME[pg] : pg == PG_WEB ? IN.name : "");
 }
 
 static int32_t len_steps(void) { return TR.len; }
@@ -564,6 +632,9 @@ static void button(uint32_t i)
             page_set(PG_SOUND);
         break;
     case B_EDIT: page_set(ui.page == PG_ENGINE ? PG_SOUND : PG_ENGINE); break;
+    case B_ENV: page_set(ui.page == PG_EXCITE ? PG_SOUND : PG_EXCITE); break;
+    case B_LFO: page_set(ui.page == PG_MOTION ? PG_SOUND : PG_MOTION); break;
+    case B_SEL: page_set(ui.page == PG_WEB ? PG_SOUND : PG_WEB); break;
     case B_FX: page_set(ui.page == PG_FX ? PG_SOUND : PG_FX); break;
     case B_GLO: page_set(ui.page == PG_GENERAL ? PG_SOUND : PG_GENERAL); break;
     case B_SEQ:
@@ -756,11 +827,11 @@ static void lights(void)
     if (ui.perf)
         btn |= 1u << B_ARP;
     {
-        static const uint8_t PB[NPAGES] = {B_HOME, B_EDIT, B_FX, B_GLO};
+        static const uint8_t PB[NPAGES] = {B_HOME, B_EDIT, B_ENV, B_LFO, B_FX, B_GLO, B_SEL};
         btn |= 1u << PB[ui.page];
     }
     dimb = (1u << B_PLAY) | (1u << B_REC) | (1u << B_SEQ) | (1u << B_FX) | (1u << B_HOME) | (1u << B_EDIT)
-           | (1u << B_GLO) | (1u << B_ARP);
+           | (1u << B_GLO) | (1u << B_ARP) | (1u << B_ENV) | (1u << B_LFO) | (1u << B_SEL);
     if (len_steps() > 16)
         dimb |= (1u << B_OCTDN) | (1u << B_OCTUP);
     plat_lights(btn | (ui.btn & ~(1u << B_PLAY)), lit, dimb, dim, 1);
@@ -1096,7 +1167,7 @@ static void draw_sliders(int32_t y)
 static void draw_knobs(int32_t y, uint32_t now)
 {
     int32_t k;
-    uint16_t col = ui.perf ? SK_MAGENTA : ui.page <= PG_ENGINE ? IN.rgb : SK_NEON;
+    uint16_t col = ui.perf ? SK_MAGENTA : INST_PAGE(ui.page) ? IN.rgb : SK_NEON;
     sk_grunge(0, y, 240, 44);
     for (k = 0; k < 4; k++) {
         const macro_t *mc = page_knob(k);
@@ -1122,7 +1193,7 @@ static void draw_knobs(int32_t y, uint32_t now)
             int_text(v, t);
             ctext(x + w / 2, y + 26, &FONT_XS, t, C_WHITE);
         } else {
-            ctext(x + w / 2, y + 26, &FONT_XS, mc->zone[z >= 0 ? z : zn], z >= 0 ? C_WHITE : SK_TXT);
+            ctext(x + w / 2, y + 26, &FONT_XS, zname(mc, z >= 0 ? z : zn), z >= 0 ? C_WHITE : SK_TXT);
         }
     }
 }
@@ -1179,10 +1250,12 @@ static void draw_playlist(int32_t y, int32_t s)
             }
             goto steps;
         }
-        x = cv_text(8, y + 17, &FONT_XS, ui.page <= PG_ENGINE ? IN.name : PAGE_NAME[ui.page],
-                    ui.page <= PG_ENGINE ? IN.rgb : SK_NEON);
-        if (ui.page == PG_ENGINE)
-            x = cv_text(x + 6, y + 17, &FONT_XS, "ENGINE", SK_MAGENTA);
+        x = cv_text(8, y + 17, &FONT_XS, INST_PAGE(ui.page) ? IN.name : PAGE_NAME[ui.page],
+                    INST_PAGE(ui.page) ? IN.rgb : SK_NEON);
+        if (INST_PAGE(ui.page) && ui.page != PG_SOUND)
+            x = cv_text(x + 6, y + 17, &FONT_XS, PAGE_NAME[ui.page], SK_MAGENTA);
+        if (ui.page == PG_WEB)
+            x = cv_text(x + 6, y + 17, &FONT_XS, IN.tag, IN.rgb);
         t[0] = 0;
         int_text(ui.view * 16 + 1, t);
         text_cat(t, "-");

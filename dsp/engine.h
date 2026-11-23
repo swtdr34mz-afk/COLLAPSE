@@ -42,13 +42,27 @@ int eng_topology(int chaos);             /* 0..3 */
 enum { FX_FM, FX_GRAIN, FX_FILTER, FX_CHAOS };
 extern const macro_t ENGINE_KNOB[4];     /* FM, GRAIN, FILTER, CHAOS */
 extern const macro_t GENERAL_KNOB[4];    /* the GENERAL page (GLO): BPM, SWING, DRIFT, LENGTH */
+/* the EXCITE page (ENV): how each body is struck */
+enum { EX_TYPE, EX_HARD, EX_POS, EX_BOUNCE };
+enum { XT_MALLET, XT_PLUCK, XT_BOW, XT_BRUSH };
+extern const macro_t EXCITE_KNOB[4];
+static inline int exc_type(int v) { return v < 32 ? XT_MALLET : v < 64 ? XT_PLUCK : v < 96 ? XT_BOW : XT_BRUSH; }
+/* the MOTION page (LFO): each instrument's slow movement, in time */
+enum { MO_RATE, MO_DEPTH, MO_SHAPE, MO_TARGET };
+extern const macro_t MOTION_KNOB[4];     /* (TARGET's zones 0..3: the instrument's own knobs, 4: PITCH) */
+/* the WEB page (SEL) */
+enum { WB_TENSION, WB_DAMPING, WB_REACH, WB_LINK };
+extern const macro_t WEB_KNOB[4];
 
 typedef struct {                         /* an instrument's track in a pattern */
     uint8_t p[4];                        /* its sound: the four knobs, 0..127 */
     uint8_t fx[4];                       /* its ENGINE page: FM, GRAIN, FILTER (64: open), CHAOS */
+    uint8_t exc[4];                      /* its EXCITE page: TYPE, HARDNESS, POSITION, BOUNCE (64: as the body has it) */
+    uint8_t mot[4];                      /* its MOTION page: RATE, DEPTH, SHAPE, TARGET */
     uint8_t level;                       /* 0..127 */
     uint8_t len;                         /* its own length, 1..64 steps (tracks of different lengths: polymeter) */
-    uint8_t rsv[2];
+    uint8_t link;                        /* how strongly it is tied into the web (WEB page): 0 apart, 64 as is */
+    uint8_t rsv;
     uint32_t steps[2], acc[2];           /* bit s of the 64: the step plays / is accented */
 } track_t;
 
@@ -61,7 +75,7 @@ typedef struct {                         /* a pattern: six tracks, the web, the 
     uint8_t drive, space;                /* the master FX: drive, reverb */
     uint8_t pitch;                       /* time in the bodies runs faster or slower: 64 = as tuned, 0 = -12, 127 = +12 */
     uint8_t glitch;                      /* the master's stutter, 0 .. 127 */
-    uint8_t rsv[3];
+    uint8_t web[3];                      /* the WEB page: TENSION, DAMPING, REACH (64: as the web was made) */
 } pattern_t;
 
 typedef struct {                         /* a factory pattern, as written in patterns.c */

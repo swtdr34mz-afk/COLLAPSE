@@ -17,6 +17,7 @@
 #include "web.c"
 
 static void body_hit(int t, const float *p, float vel, uint32_t *ns);
+static void later(int t, float wait, float vel);
 
 /* =============================================================== the state === */
 static const pattern_t *PAT;
@@ -46,6 +47,7 @@ static volatile uint8_t muted;
 typedef struct {
     uint16_t at;
     float vel, p[4];
+    float semi;                          /* MOTION's PITCH: this hit tuned up or down (semitones) */
 } ev_t;
 static ev_t ev[NINST][NEV];
 static uint8_t nev[NINST];
@@ -269,6 +271,42 @@ void eng_panic(void)
     }
 }
 
+/* MOTION: each instrument's slow movement, on its own clock in steps (from PLAY) */
+static float mo_pos;                     /* steps since PLAY, at the top of the block */
+static int32_t mo_cycle[NINST];          /* RANDOM: the turn its value is for */
+static float mo_val[NINST];
+static uint32_t mo_noise = 0x68E31DA4u;
+static float motion(int t, uint32_t at, int *target)   /* -1 .. 1 x DEPTH now, and where it goes (0..3 a knob, 4 PITCH) */
+{
+    const uint8_t *m = PAT->tr[t].mot;
+    float d = (float)m[MO_DEPTH] / 127.0f, cyc, x, v;
+    int32_t turn;
+    if (d <= 0.0f)
+        return 0.0f;
+    cyc = 4.0f * fm_exp2f((float)m[MO_RATE] * (6.0f / 127.0f));     /* 4 .. 256 steps */
+    x = (mo_pos + (float)at / fm_maxf(g_step, 1.0f)) / cyc;
+    turn = (int32_t)x;
+    x -= (float)turn;
+    switch (exc_type(m[MO_SHAPE])) {     /* (the same four zones as EXCITE's TYPE) */
+    case 0: v = fm_sin_turns(x); break;
+    case 1: v = 2.0f * x - 1.0f; break;
+    case 2:
+        if (turn != mo_cycle[t]) {
+            mo_cycle[t] = turn;
+            mo_val[t] = white(&mo_noise);
+        }
+        v = mo_val[t];
+        break;
+    default: {                           /* BOUNCE: a ball's hops, lower and quicker each */
+        float y = 1.0f - (1.0f - x) * (1.0f - x);
+        v = 2.0f * (1.0f - x) * fm_fabsf(fm_sin_turns(y * 2.5f)) - 1.0f;
+        break;
+    }
+    }
+    *target = m[MO_TARGET] / 26 > 4 ? 4 : m[MO_TARGET] / 26;
+    return v * d;
+}
+
 /* a hit queued at sample `at` of the block: its knobs now (as set, pushed by the web, moved by MASS), then its push */
 static void push_ev(int t, uint32_t at, float vel)
 {
@@ -280,6 +318,22 @@ static void push_ev(int t, uint32_t at, float vel)
     e->vel = vel;
     web_knobs(t, PAT->tr[t].p, (int)g_mass, e->p);
     morph_knobs(t, e->p);
+    e->semi = 0.0f;
+    {                                    /* MOTION: a knob moved, or the pitch */
+        int tg = 0;
+        float mv = motion(t, at, &tg);
+        if (mv != 0.0f) {
+            if (tg < 4)
+                e->p[tg] = fm_clampf(e->p[tg] + mv * 64.0f, 0.0f, 127.0f);
+            else
+                e->semi = mv * 12.0f;
+        }
+    }
+    {                                    /* EXCITE's BOUNCE: the mallet springs back: a flam, a rattle, a buzz */
+        float b = (float)PAT->tr[t].exc[EX_BOUNCE] / 127.0f;
+        if (b > 0.02f && vel > 0.2f)
+            later(t, (float)at + (30.0f + 260.0f * (1.0f - b)) * (0.7f + 0.6f * rnd01()), vel * (0.25f + 0.35f * b));
+    }
     web_push(t, vel, (int)g_mass, (int)g_chaos);
     hits++;
 }
@@ -674,8 +728,13 @@ void eng_init(void)
     for (t = 0; t < NINST; t++) {
         pat0.tr[t].len = 16;
         pat0.tr[t].fx[FX_FILTER] = 64;
+        pat0.tr[t].exc[EX_TYPE] = 10;
+        pat0.tr[t].exc[EX_HARD] = pat0.tr[t].exc[EX_POS] = 64;
+        pat0.tr[t].mot[MO_RATE] = 64;
+        pat0.tr[t].link = 64;
     }
     pat0.pitch = 64;
+    pat0.web[0] = pat0.web[1] = pat0.web[2] = 64;
     PAT = &pat0;
     web_topology(eng_topology(64));
     {                                    /* the bodies tuned before their first hit: another may shake them first */
@@ -783,8 +842,152 @@ static inline float ifx_run(int t, float y)
     if (x->flt_mode) {
         float lp, bp, hp = svf_run(&x->flt, &x->flt_s, y, &lp, &bp);
         y = x->flt_mode == 1 ? lp : hp;
+        if (!(y == y)) {                 /* (never: but a filter that ever held a NaN is cleared, not kept) */
+            x->flt_s.ic1 = x->flt_s.ic2 = 0.0f;
+            y = 0.0f;
+        }
     }
     return y;
+}
+
+/* ------------------------------------------------------------- EXCITE --- */
+/* How a body is struck (the EXCITE page). The body's own mallet, made softer or harder and moved (HARDNESS, POSITION),
+ * or instead:
+ * PLUCK: a push of a sample or two at the rim: bright, thin;
+ * BOW: friction: a bow drawn across the body for a beat. It pulls the mass it touches along until it slips (a force
+ * that falls as the two speeds part: P dv k / (1 + (k dv)^2), dv the bow's speed less the mass's): stick and slip, the
+ * body sings on its own note for as long as the bow is drawn;
+ * BRUSH: a scrape: noise pushing the body, fading over 30 .. 120 ms.
+ * The pushes go where the web's do (the mass a body is pushed at). */
+typedef struct {
+    uint8_t type;
+    float env, att, rel, left;           /* the bow's and the brush's envelope: rising, held `left` samples, falling */
+    float pres, vb, k;                   /* the bow */
+    float brush;                         /* the brush's level */
+    uint32_t ns;
+} exc_t;
+static exc_t EXC[NINST];
+
+static float *contact_v(int t)           /* the speed of the mass a body is pushed at */
+{
+    inst_state_t *s = &S[t];
+    switch (t) {
+    case I_KICK: return &s->body.k.h.v0;
+    case I_SNARE: return &s->body.s.h.v0;
+    case I_HATS: return &s->body.h.v[0];
+    case I_GLITCH: return &s->body.g.v0;
+    case I_PERC: return &s->body.p.v[0];
+    default: return &s->body.b.v[NS / 2];
+    }
+}
+
+/* the body's own mallet, softer or harder (f: its length x f, the same push in all; ampf: the push x ampf), moved
+ * (pos 0 centre .. 1 rim, < 0 as it was) */
+static void mallet_shape(int t, float f, float pos, float ampf)
+{
+    inst_state_t *s = &S[t];
+    float *len, *left, *amp;
+    switch (t) {
+    case I_KICK: len = &s->body.k.h.m_len; left = &s->body.k.h.m_left; amp = &s->body.k.h.m_amp;
+        if (pos >= 0.0f)
+            s->body.k.h.m_pos = pos * 0.9f;
+        break;
+    case I_SNARE: len = &s->body.s.h.m_len; left = &s->body.s.h.m_left; amp = &s->body.s.h.m_amp;
+        if (pos >= 0.0f)
+            s->body.s.h.m_pos = pos * 0.9f;
+        break;
+    case I_HATS: len = &s->body.h.m_len; left = &s->body.h.m_left; amp = &s->body.h.m_amp; break;
+    case I_PERC: len = &s->body.p.m_len; left = &s->body.p.m_left; amp = &s->body.p.m_amp;
+        if (pos >= 0.0f)
+            s->body.p.m_pos = pos;
+        break;
+    case I_BASS: len = &s->body.b.m_len; left = &s->body.b.m_left; amp = &s->body.b.m_amp;
+        if (pos >= 0.0f)
+            s->body.b.m_at = 1 + (int)(pos * (float)(NS / 2 - 1));
+        break;
+    default: return;                     /* (the GLITCH's ball is its own mallet) */
+    }
+    if (*len <= 0.0f)
+        return;
+    {
+        float nl = fm_clampf(*len * f, 2.0f, 600.0f);   /* (two samples at least: one is no push at all) */
+        *amp *= *len / nl * ampf;
+        *len = *left = nl;
+    }
+}
+
+/* a hit with its EXCITE: after the body's own strike */
+static void excite(int t, float vel)
+{
+    const uint8_t *x = PAT->tr[t].exc;
+    exc_t *e = &EXC[t];
+    float hard = fm_exp2f(((float)x[EX_HARD] - 64.0f) / 32.0f);   /* 0.25 .. 4 */
+    float pos = fm_fabsf((float)x[EX_POS] - 64.0f) < 3.0f ? -1.0f : (float)x[EX_POS] / 127.0f;
+    e->type = (uint8_t)exc_type(x[EX_TYPE]);
+    if (!e->ns)
+        e->ns = 0x2F6B1C3Du + 977u * (uint32_t)t;
+    switch (e->type) {
+    case XT_PLUCK:
+        mallet_shape(t, 0.12f / hard, pos >= 0.0f ? pos : 0.9f, 1.0f);
+        break;
+    case XT_BOW:                         /* the mallet barely; the bow drawn for a beat */
+        mallet_shape(t, 4.0f, pos, 1.0f);
+        if (t == I_GLITCH)
+            S[t].body.g.g = 0.0f;        /* (a bowed plate: no ball) */
+        e->att = 1.0f / (0.015f * ENG_SR);
+        e->rel = 1.0f / (0.06f * ENG_SR);
+        e->left = 4.0f * g_step;
+        {                                /* (how hard each body takes a bow: the string is easy to drive) */
+            static const float BOWP[NINST] = {1.0f, 1.0f, 1.2f, 0.8f, 1.0f, 0.3f};
+            e->pres = 0.004f * vel * hard * BOWP[t];
+        }
+        e->vb = 0.08f + 0.1f * vel;
+        e->k = 14.0f;
+        break;
+    case XT_BRUSH:
+        mallet_shape(t, 3.0f, pos, 0.25f);   /* (the brush instead of most of the hit) */
+        e->brush = 0.05f * vel;
+        e->env = 1.0f;
+        e->rel = 1.0f / ((0.03f + 0.09f / hard) * ENG_SR);
+        break;
+    default:
+        mallet_shape(t, 1.0f / hard, pos, 1.0f);
+        break;
+    }
+    if (e->type != XT_BOW && e->type != XT_BRUSH)
+        e->env = 0.0f;
+}
+
+static inline float excite_push(int t)   /* the bow's or the brush's push now */
+{
+    exc_t *e = &EXC[t];
+    if (e->env <= 0.0f && e->left <= 0.0f)
+        return 0.0f;
+    if (e->type == XT_BOW) {
+        float dv, kd;
+        if (e->left > 0.0f) {
+            e->left -= 1.0f;
+            e->env = fm_minf(e->env + e->att, 1.0f);
+        } else {
+            e->env -= e->rel;
+            if (e->env <= 0.0f) {
+                e->env = 0.0f;
+                return 0.0f;
+            }
+        }
+        dv = e->vb - *contact_v(t);
+        kd = e->k * dv;
+        return e->env * e->pres * kd / (1.0f + kd * kd);
+    }
+    if (e->type == XT_BRUSH) {
+        e->env -= e->rel;
+        if (e->env <= 0.0f) {
+            e->env = 0.0f;
+            return 0.0f;
+        }
+        return e->env * e->env * e->brush * white(&e->ns);
+    }
+    return 0.0f;
 }
 
 static void body_hit(int t, const float *p, float vel, uint32_t *ns)
@@ -825,12 +1028,12 @@ static void render_inst(int t)
         if (RANK[a] < RANK[t] && wtie[a][t] > 0.0f) {
             int now = a == I_KICK || (CORE_OF[a] == CORE_OF[t] && ORDER[a] < ORDER[t]);
             src[ns] = now ? ibuf[a] : prevbuf[a];
-            gain[ns] = couple * SENS[t] * wtie[a][t] * own;
+            gain[ns] = couple * SENS[t] * wtie[a][t] * own * g_lk[a] * g_lk[t];
             pmax += gain[ns] * (now ? S[a].peak : prevpeak[a]);
             ns++;
         }
     /* asleep (silent a while, nothing struck, nothing pushing it): not computed at all */
-    if (s->quiet >= SLEEP_BLOCKS && !nev[t] && pmax < 1e-6f) {
+    if (s->quiet >= SLEEP_BLOCKS && !nev[t] && pmax < 1e-6f && EXC[t].left <= 0.0f && EXC[t].env <= 0.0f) {
         for (i = 0; i < n; i++)
             out[i] = 0.0f;
         s->peak = 0.0f;
@@ -842,11 +1045,23 @@ static void render_inst(int t)
         float y, m, push = 0.0f;
         uint32_t j;
         while (e < nev[t] && ev[t][e].at <= i) {
+            uint32_t c = plat_core() & 1u;
+            float ws = g_wsc[c], ts = g_tsc[c];
+            if (ev[t][e].semi != 0.0f) { /* MOTION's PITCH: this hit's time faster or slower */
+                float d = fm_exp2f(ev[t][e].semi / 12.0f);
+                g_wsc[c] = ws * d;
+                g_tsc[c] = ts / d;
+            }
             body_hit(t, ev[t][e].p, ev[t][e].vel, &s->noise);
+            excite(t, ev[t][e].vel);
+            g_wsc[c] = ws;
+            g_tsc[c] = ts;
             e++;
         }
         for (j = 0; j < ns; j++)
             push += gain[j] * src[j][i];
+        if (EXC[t].env > 0.0f || EXC[t].left > 0.0f)
+            push += excite_push(t);
         switch (t) {
         case I_KICK: y = kick_body_sample(&s->body.k, push); break;
         case I_SNARE: y = snare_body_sample(&s->body.s, push); break;
@@ -855,6 +1070,8 @@ static void render_inst(int t)
         case I_PERC: y = perc_body_sample(&s->body.p, push); break;
         default: y = bass_body_sample(&s->body.b, push); break;
         }
+        if (fm_fabsf(y) > 1.5f)          /* (a safety: whatever a body does, never far over full scale) */
+            y = 1.5f * fm_tanhf(y * (1.0f / 1.5f));
         if (fx_on)
             y = ifx_run(t, y);
         m = fm_fabsf(y);
@@ -916,10 +1133,19 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
     g_step = step_base();
     if (shed)
         shed--;
+    if (step_now >= 0)                   /* MOTION's clock */
+        mo_pos += (float)n / fm_maxf(g_step, 1.0f);
+    else
+        mo_pos = 0.0f;
+    g_tens = fm_exp2f(((float)PAT->web[WB_TENSION] - 64.0f) / 32.0f);   /* WEB: 0.25 .. 4 */
+    g_damp = fm_exp2f(((float)PAT->web[WB_DAMPING] - 64.0f) / 40.0f);
+    g_reach = fm_exp2f(((float)PAT->web[WB_REACH] - 64.0f) / 32.0f);
+    for (t = 0; t < NINST; t++)
+        g_lk[t] = (float)PAT->tr[t].link / 64.0f;
     master_block();
     pads_block(n);
-    g_wscale = g_dil / ENG_SR;           /* PITCH (and the pads): time in the bodies, faster or slower */
-    g_tscale = ENG_SR / g_dil;
+    g_wsc[0] = g_wsc[1] = g_dil / ENG_SR;   /* PITCH (and the pads): time in the bodies, faster or slower */
+    g_tsc[0] = g_tsc[1] = ENG_SR / g_dil;
     sequence(n);
     if (slam_req) {
         slam_req = 0;

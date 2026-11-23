@@ -15,6 +15,8 @@
 static float wd[NINST][4], wv[NINST][4];   /* displacement (knob units), velocity (units a second) */
 static float wtie[NINST][NINST];           /* the ties now (0: none) */
 static int w_topo = -1;
+/* the WEB page: TENSION, DAMPING, REACH (x, 1 as made), each instrument's LINK (0 apart .. 1 as made .. 2 welded) */
+static float g_tens = 1.0f, g_damp = 1.0f, g_reach = 1.0f, g_lk[NINST] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 static uint32_t web_noise = 0x6C8E9CF5u;
 
 /* the way a push travels along a tie, i to j, on knob k: fixed, -1 .. 1, never small */
@@ -64,11 +66,11 @@ static void web_push(int i, float vel, int mass, int chaos)
     int j, k;
     web_topology(eng_topology(chaos));
     for (k = 0; k < 4; k++)
-        wv[i][k] += a * 0.8f * white(&web_noise);
+        wv[i][k] += a * 0.8f * white(&web_noise) * fm_minf(g_lk[i], 1.0f);
     for (j = 0; j < NINST; j++)
         if (wtie[i][j] > 0.0f)
             for (k = 0; k < 4; k++)
-                wv[j][k] += a * wtie[i][j] * tie_sign(i, j, k);
+                wv[j][k] += a * wtie[i][j] * g_lk[i] * g_lk[j] * tie_sign(i, j, k);
 }
 
 /* everything shoved at once, hard (the intro's collapse) */
@@ -82,8 +84,8 @@ static void web_slam(void)
 
 static void web_step(float dt, int mass, int chaos)
 {
-    float m = w_mass(mass), K = 40.0f, ch = (float)chaos / 127.0f;
-    float zeta = 0.12f + 0.38f * (1.0f - ch), c = 2.0f * zeta * fm_sqrtf(K * m), kc = 12.0f + 40.0f * ch;
+    float m = w_mass(mass), K = 40.0f * g_tens, ch = (float)chaos / 127.0f;
+    float zeta = (0.12f + 0.38f * (1.0f - ch)) * g_damp, c = 2.0f * zeta * fm_sqrtf(K * m), kc = 12.0f + 40.0f * ch;
     float acc[NINST][4];
     int i, j, k;
     web_topology(eng_topology(chaos));
@@ -92,7 +94,7 @@ static void web_step(float dt, int mass, int chaos)
             float f = -K * wd[i][k] - c * wv[i][k];
             for (j = 0; j < NINST; j++)
                 if (wtie[i][j] > 0.0f)
-                    f += kc * wtie[i][j] * (wd[j][k] - wd[i][k]);
+                    f += kc * wtie[i][j] * g_lk[i] * g_lk[j] * (wd[j][k] - wd[i][k]);
             acc[i][k] = f / m;
         }
     for (i = 0; i < NINST; i++)
@@ -114,7 +116,7 @@ static void web_knobs(int t, const uint8_t *set, int mass, float *out)
     float mm = (float)(mass - 64) / 63.0f;
     int k;
     for (k = 0; k < 4; k++)
-        out[k] = (float)set[k] + wd[t][k];
+        out[k] = (float)set[k] + wd[t][k] * g_reach;
     if (W_TUNE[t] != 255u)
         out[W_TUNE[t]] -= mm * (t == I_GLITCH ? 30.0f : 22.0f);
     out[W_DECAY[t]] += mm * 30.0f;

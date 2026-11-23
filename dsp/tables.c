@@ -77,3 +77,27 @@ const macro_t MUTATE_KNOB[4] = {
     {"ENTANGLE", 4, {0, 32, 64, 112}, {"APART", "PAIRS", "ROTATE", "SCATTER"}},
     {"RIPPLE", 4, {0, 40, 80, 120}, {"STILL", "ECHO", "WAVES", "SWARM"}},
 };
+
+/* EXCITE: how each body is struck (64: as the body has it) */
+const macro_t EXCITE_KNOB[4] = {
+    {"TYPE", 4, {10, 42, 80, 116}, {"MALLET", "PLUCK", "BOW", "BRUSH"}},
+    {"HARDNESS", 5, {0, 32, 64, 96, 127}, {"FELT", "SOFT", "AS IS", "HARD", "STEEL"}},
+    {"POSITION", 5, {0, 32, 64, 96, 127}, {"CENTRE", "INNER", "AS IS", "OUTER", "RIM"}},
+    {"BOUNCE", 4, {0, 40, 85, 127}, {"DEAD", "FLAM", "RATTLE", "BUZZ"}},
+};
+
+/* MOTION: a slow movement in time (RATE: one turn in 4 steps .. 16 bars) */
+const macro_t MOTION_KNOB[4] = {
+    {"RATE", 5, {0, 32, 64, 96, 127}, {"1 BEAT", "2 BEATS", "1 BAR", "4 BARS", "16 BARS"}},
+    {"DEPTH", 4, {0, 40, 85, 127}, {"OFF", "DRIFT", "SWAY", "WILD"}},
+    {"SHAPE", 4, {10, 42, 80, 116}, {"SINE", "SAW", "RANDOM", "BOUNCE"}},
+    {"TARGET", 5, {10, 36, 62, 88, 118}, {0, 0, 0, 0, "PITCH"}},
+};
+
+/* WEB: the springs themselves (TENSION, DAMPING, REACH: the pattern's; LINK: the picked instrument's) */
+const macro_t WEB_KNOB[4] = {
+    {"TENSION", 5, {0, 32, 64, 96, 127}, {"SLACK", "LOOSE", "AS MADE", "TIGHT", "STEEL"}},
+    {"DAMPING", 5, {0, 32, 64, 96, 127}, {"ENDLESS", "SWINGY", "AS MADE", "SETTLED", "DEAD"}},
+    {"REACH", 5, {0, 32, 64, 96, 127}, {"FAINT", "LIGHT", "AS MADE", "FAR", "WILD"}},
+    {"LINK", 4, {0, 32, 64, 127}, {"APART", "LOOSE", "TIED", "WELDED"}},
+};

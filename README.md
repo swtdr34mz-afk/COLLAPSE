@@ -42,11 +42,22 @@ The bass ducks under the kick.
 | --- | --- | --- | --- | --- | --- |
 | HOME | **SOUND** (the instrument's body) | its four knobs (above) | | | |
 | EDIT | **ENGINE** (the instrument's own effects) | FM: OFF, WARBLE, BELL, NOISE | GRAIN: OFF, HAZE, CLOUD, SPRAY | FILTER: DARK, LOW, OPEN, THIN, AIR | CHAOS: STILL, LOOSE, BOUNCE, AVALANCHE |
+| ENV | **EXCITE** (how the body is struck) | TYPE: MALLET, PLUCK, BOW, BRUSH | HARDNESS: FELT, SOFT, AS IS, HARD, STEEL | POSITION: CENTRE, INNER, AS IS, OUTER, RIM | BOUNCE: DEAD, FLAM, RATTLE, BUZZ |
+| LFO | **MOTION** (a slow movement, in time) | RATE: 1 BEAT .. 16 BARS | DEPTH: OFF, DRIFT, SWAY, WILD | SHAPE: SINE, SAW, RANDOM, BOUNCE | TARGET: the instrument's four knobs, or PITCH |
+| SEL | **WEB** (the springs themselves) | TENSION: SLACK .. STEEL | DAMPING: ENDLESS .. DEAD | REACH: FAINT .. WILD | LINK (the picked instrument): APART, LOOSE, TIED, WELDED |
 | FX | **FX** (the master) | DRIVE: CLEAN, GLUE, HOT, MELT | SPACE: DRY, ROOM, HALL, VOID | PITCH: -12, -5, 0, +7, +12 | GLITCH: OFF, SKIP, STUTTER, SHRED |
 | GLO | **GENERAL** | BPM | SWING: STRAIGHT, SHUFFLE, DRUNK | DRIFT: GRID, HUMAN, LOOSE, FREE | LENGTH: the picked track's steps, 1-64 |
 
 The same button again goes back to SOUND.
 
+- **EXCITE** as in Anukari, where mallets, plectrums and bows are parts of their own: **BOW** draws a bow across the
+  body for a beat (real stick-slip friction: the body sings on its own note for as long as the bow is drawn), **PLUCK** a
+  sharp push at the rim, **BRUSH** a scrape of noise. HARDNESS and POSITION change the body's own mallet (64: as it is);
+  BOUNCE lets the mallet spring back: a flam, a rattle, a buzz. TYPE, SHAPE and TARGET move a whole choice a click.
+- **MOTION**: each instrument's own slow movement, on the beat: a knob of its own, or its pitch (by time in the body),
+  swayed by a sine, a ramp, a random step each turn, or a ball's hops.
+- **WEB**: how stiff the springs are, how long the web keeps wobbling after a hit, how far it moves the knobs; and how
+  firmly the picked instrument is tied in (APART: nothing pushes it, it pushes nothing).
 - **FM**: the sound read from a short line whose length swings at audio rate (phase modulation): a warble, bells, noise.
 - **GRAIN**: two grains from the last 46 ms, at half, the same or twice the speed.
 - **CHAOS** (an instrument's own): how easily the web pushes it, and the chance that a hit **bounces**: it strikes again

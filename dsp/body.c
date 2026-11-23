@@ -31,7 +31,10 @@ static float g_step;                     /* samples a step, now (the render's: t
 /* PITCH, as Anukari's: time in the bodies runs faster or slower. Every frequency is scaled by it and every decay
  * shortened by it, as if the body were played back faster: (w = 2 pi f g_wscale, a decay of tau seconds lasts
  * tau g_tscale samples) */
-static float g_wscale = 1.0f / ENG_SR, g_tscale = ENG_SR;
+static float g_wsc[2] = {1.0f / ENG_SR, 1.0f / ENG_SR}, g_tsc[2] = {ENG_SR, ENG_SR};   /* (each core its own: a hit
+                                          * may be tuned for itself, MOTION's PITCH, while the other core strikes) */
+#define g_wscale g_wsc[plat_core() & 1u]
+#define g_tscale g_tsc[plat_core() & 1u]
 #define WMAX 1.2f                        /* (a spring never rings above this w, whatever PITCH does: stable) */
 static inline float k01(float v) { return fm_clampf(v, 0.0f, 127.0f) * (1.0f / 127.0f); }
 
@@ -52,9 +55,14 @@ typedef struct {
 
 /* a head tuned to f0 (Hz), its ring at ratio x f0, a full hit at most `sweep` times above its note, drag, decay (s),
  * the ring's decay (s) */
+/* a body retuned while it rings keeps its energy: its swing scaled by sqrt(k before / k now) (a stiffer spring with
+ * the same swing would hold more energy: retuned often, a body would be pumped up) */
+static inline float keep(float k_was, float k_now) { return k_was > 0.0f && k_now > 0.0f ? fm_sqrtf(k_was / k_now) : 1.0f; }
+
 static void head_set(head_t *b, float f0, float ratio, float sweep, float drag, float decay, float ring_decay)
 {
-    float w0 = FM_TWO_PI * f0 * g_wscale, wr = w0 * ratio, r2 = sweep * sweep;
+    float w0 = FM_TWO_PI * f0 * g_wscale, wr = w0 * ratio, r2 = sweep * sweep, k0_was = b->k0, kr_was = b->kr, c, cr;
+    int i;
     b->w0 = w0;
     b->k0 = w0 * w0;
     b->nl = (r2 - 1.0f) * r2 * r2 / (0.81f * 0.81f);   /* y^2 (1 + nl y^4) = v^2 at the top of a full hit (v ~0.9) */
@@ -64,6 +72,11 @@ static void head_set(head_t *b, float f0, float ratio, float sweep, float drag, 
     b->ks = b->k0 * 0.06f;
     b->kg = b->k0 - (float)KR * b->ks;   /* (the ties to the ring stiffen the centre: the ground less) */
     b->kn = b->kr * 0.4f;
+    c = keep(k0_was, b->k0);
+    cr = keep(kr_was, b->kr);
+    b->x0 *= c;
+    for (i = 0; i < KR; i++)
+        b->x[i] *= cr;
     b->d0 = fm_expf(-1.0f / (decay * g_tscale));
     b->dr = fm_expf(-1.0f / (ring_decay * g_tscale));
 }
@@ -181,7 +194,8 @@ static void snare_body_hit(snare_body_t *b, const float *p, float vel, uint32_t 
     head_set(&b->h, f0, 1.59f, 1.35f, 0.01f, 0.05f + 0.25f * decay, 0.03f + 0.08f * decay);
     b->h.mic_ring = 0.5f;
     for (i = 0; i < NW; i++) {
-        float w = fm_minf(FM_TWO_PI * WIRE_HZ[i] * wt * g_wscale, WMAX);
+        float w = fm_minf(FM_TWO_PI * WIRE_HZ[i] * wt * g_wscale, 0.7f);   /* (under 5 kHz: a contact switching
+                                          * on and off near the sample rate would pump energy in) */
         b->wk[i] = w * w;
     }
     b->wd = fm_expf(-1.0f / ((0.004f + 0.03f * decay + 0.02f * snap) * g_tscale));
@@ -203,11 +217,12 @@ static inline float snare_body_sample(snare_body_t *b, float push)
     for (i = 0; i < NW; i++) {           /* each wire under ring mass i % 6: the head slaps it down, never pulls it
                                           * (a wire is so light the head does not feel it) */
         float hy = b->h.x[i % KR] * b->h.w0, pen = hy - b->wx[i] + b->gap, f = 0.0f;
-        if (pen < 0.0f) {                /* touching: the contact pushes the wire down, and it scrapes */
-            f = b->kc * pen;
+        if (pen < 0.0f) {                /* touching: the contact pushes the wire down (with a loss), and it scrapes */
+            f = b->kc * pen - 0.15f * b->wv[i];
             scrape -= pen;
         }
         b->wv[i] = (b->wv[i] - b->wk[i] * b->wx[i] + f) * b->wd;
+        b->wv[i] *= 1.0f - fm_minf(0.05f * b->wv[i] * b->wv[i], 0.5f);
         b->wx[i] += b->wv[i];
         wire += b->wv[i];
     }
@@ -228,7 +243,7 @@ static const float PLATE_HZ[NP] = {2810.0f, 3360.0f, 4070.0f, 4740.0f, 5390.0f, 
 typedef struct {
     float x[NP], v[NP];
     float k[NP];                         /* each to its ground (w^2) */
-    float kc, nl, lim;                   /* the ties along the plate; how far they pull before they give way */
+    float kc, nl, lim, nl3;              /* the ties along the plate; how far they pull before they give way */
     float d;                             /* damping a sample */
     float m_amp, m_len, m_left;          /* the stick */
     float hp, hp_a;                      /* the microphone's high-pass */
@@ -245,11 +260,13 @@ static void hats_body_hit(hats_body_t *b, const float *p, float vel, uint32_t *n
     int i;
     for (i = 0; i < NP; i++) {
         float w = fm_minf(FM_TWO_PI * PLATE_HZ[i] * t * (1.0f + 0.01f * white(ns)) * g_wscale, WMAX);
+        b->x[i] *= keep(b->k[i], w * w);
         b->k[i] = w * w;
     }
     b->kc = 0.01f + 0.08f * metal;
     b->nl = 2.0f + 60.0f * metal * metal;
     b->lim = 1.0f / fm_sqrtf(b->nl);
+    b->nl3 = b->nl * (1.0f / 3.0f);
     b->d = fm_expf(-1.0f / ((0.012f + 0.6f * decay * decay * decay) * g_tscale));
     b->m_len = b->m_left = 3.0f;
     b->m_amp = 2.0f * 1.6f * vel / 3.0f;
@@ -272,8 +289,10 @@ static inline float hats_body_sample(hats_body_t *b, float push)
         int j;
         for (j = 1; j <= 3; j += 2) {
             int o = (i + j) % NP;
-            float d = b->x[i] - b->x[o], t = b->kc * fm_clampf(d, -b->lim, b->lim);   /* (it gives way past
-                                          * lim: a bounded force, so the plate can never gain energy; no division) */
+            float d = fm_clampf(b->x[i] - b->x[o], -b->lim, b->lim), t = b->kc * d * (1.0f - b->nl3 * d * d);
+                                          /* (it gives way smoothly when stretched: d - nl d^3 / 3 up to lim =
+                                          * 1 / sqrt(nl), flat past it; bounded, and without a kink a coarse step could
+                                          * pump energy through) */
             f[i] -= t;
             f[o] += t;
         }
@@ -286,8 +305,10 @@ static inline float hats_body_sample(hats_body_t *b, float push)
         f[3] += 0.5f * ph;
         b->m_left -= 1.0f;
     }
-    for (i = 0; i < NP; i++) {
-        b->v[i] = (b->v[i] + f[i]) * b->d;
+    for (i = 0; i < NP; i++) {           /* (and a drag: the air takes the big swings out fast, the small ones
+                                          * hardly; the nonlinear ties alone can hold a big swing up) */
+        float v = (b->v[i] + f[i]) * b->d;
+        b->v[i] = v * (1.0f - fm_minf(0.01f * v * v, 0.5f));
         b->x[i] += b->v[i];
         m += b->v[i] * PLATE_MIC[i];
     }
@@ -299,7 +320,7 @@ static inline float hats_body_sample(hats_body_t *b, float push)
         float n = white(&b->ns) * b->s_env;
         b->s_hp += 0.35f * (n - b->s_hp);
         n -= b->s_hp;
-        out = drive_clip((m * b->ring + n * b->sizzle) * 0.3f, b->drive) * b->makeup;
+        out = drive_clip((m * b->ring + n * b->sizzle) * 0.85f, b->drive) * b->makeup;   /* (x2.8: the drag's loss) */
     }
     if (body_bad(out, b->x[0])) {
         zero(b, sizeof *b);
@@ -330,6 +351,7 @@ static void perc_body_hit(perc_body_t *b, const float *p, float vel, uint32_t *n
     r[2] = CURVE(P_R2, p[2]);
     for (i = 0; i < 3; i++) {
         float w = fm_minf(FM_TWO_PI * f * r[i] * g_wscale, WMAX);
+        b->x[i] *= keep(b->k[i], w * w);
         b->k[i] = w * w;
         b->d[i] = fm_expf(-1.0f / (tau / fm_sqrtf(r[i]) * g_tscale));   /* the higher modes die sooner */
     }
@@ -358,7 +380,8 @@ static inline float perc_body_sample(perc_body_t *b, float push)
         b->m_left -= 1.0f;
     }
     for (i = 0; i < 3; i++) {
-        b->v[i] = (b->v[i] + f[i]) * b->d[i];
+        float v = (b->v[i] + f[i]) * b->d[i];
+        b->v[i] = v * (1.0f - fm_minf(0.02f * v * v, 0.5f));   /* (the air, as the string's) */
         b->x[i] += b->v[i];
     }
     out = drive_clip((b->v[0] + 0.7f * b->v[1] + 0.5f * b->v[2]) * 0.8f, b->drive) * b->makeup;
@@ -390,9 +413,16 @@ static void bass_body_hit(bass_body_t *b, const float *p, float vel, uint32_t *n
     float semi = fm_floorf(CURVE(B_NOTE, p[0]) + 0.5f), decay = k01(p[1]), wo = k01(p[2]), dirt = k01(p[3]);
     float f = 41.2034f * fm_exp2f(semi / 12.0f), w1 = FM_TWO_PI * f * g_wscale, sk = w1 * (float)(NS + 1) / FM_PI;
     (void)ns;
-    b->k = sk * sk;
-    if (b->kt <= 0.0f)
-        b->kt = b->k;
+    {
+        float k = fm_minf(sk * sk, 0.25f);   /* (its highest mode, 2 sqrt(k), kept well under 2: stable, whatever the
+                                          * pitch is moved to) */
+        float c = keep(b->k, k);
+        int i;
+        for (i = 0; i < NS; i++)
+            b->x[i] *= c;
+        b->kt = b->kt > 0.0f ? b->kt * k / fm_maxf(b->k, 1e-9f) : k;
+        b->k = k;
+    }
     b->nl = 0.3f + 2.5f * dirt;
     b->d = fm_expf(-1.0f / ((0.15f + 3.5f * decay * decay) * g_tscale));
     b->dh = 0.0002f + 0.004f * (1.0f - dirt);   /* clean: the highs die fast (round); dirty: they ring (growl) */
@@ -418,7 +448,7 @@ static inline float bass_body_sample(bass_body_t *b, float push)
             e += d * d;
         }
         e *= b->k * (1.0f / NS) * 4.0f;
-        b->kt = b->k * (1.0f + fm_minf(b->nl * e, 3.0f));
+        b->kt = fm_minf(b->k * (1.0f + fm_minf(b->nl * e, 3.0f)), 0.6f);
     }
     k = b->kt;
     for (i = 0; i < NS; i++) {           /* each mass between its neighbours (the ends fixed) */
@@ -436,6 +466,9 @@ static inline float bass_body_sample(bass_body_t *b, float push)
     for (i = 0; i < NS; i++) {           /* velocities, the highs damped by the string's bending */
         float next = i + 1 < NS ? b->v[i + 1] : 0.0f, nv = (b->v[i] + f[i]) * b->d;
         nv += b->dh * (prev + next - 2.0f * b->v[i]);
+        if (!(b->n & 3u))                /* (the air, every 4th sample: a string driven at its note by the others
+                                          * never runs away) */
+            nv *= 1.0f - fm_minf(0.08f * nv * nv, 0.5f);
         prev = b->v[i];
         b->v[i] = nv;
     }
@@ -513,8 +546,12 @@ static inline float glitch_body_sample(glitch_body_t *b, float push)
                 float j = -(1.0f + b->e) * vr / (1.0f / GL_MB + 1.0f);
                 b->vy += j / GL_MB;
                 b->v0 -= j;
-                if (b->data > 0.0f && vr < -0.06f)   /* DATA: the plate retuned at each real impact */
-                    b->k0 = b->k0_set * fm_exp2f(b->data * 2.0f * white(&b->ns));
+                if (b->data > 0.0f && vr < -0.06f) {   /* DATA: the plate retuned at each real impact (its energy
+                                          * kept: the swing scaled, so a retune never pumps it up) */
+                    float k = b->k0_set * fm_exp2f(b->data * 2.0f * white(&b->ns));
+                    b->x0 *= fm_sqrtf(b->k0 / k);
+                    b->k0 = k;
+                }
             } else {                     /* lying on the plate: carried along, silently (a plate shaken down faster
                                           * than the ball falls throws it up again: it dances) */
                 b->vy = b->v0;
@@ -530,7 +567,7 @@ static inline float glitch_body_sample(glitch_body_t *b, float push)
         }
         out = b->crush_s;
     }
-    out = drive_clip(out * 1.4f, 1.3f) * b->makeup;
+    out = fm_tanhf(out * 1.4f) * b->makeup;
     if (body_bad(out, b->x0) || body_bad(out, b->y)) {
         zero(b, sizeof *b);
         return 0.0f;

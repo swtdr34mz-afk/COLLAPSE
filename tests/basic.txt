@@ -57,15 +57,45 @@ expect page 1
 expect k4 20
 shot engine.png
 tap FX
-expect page 2
+expect page 4
 expect k1 30
 shot master.png
 tap GLO
-expect page 3
+expect page 5
 expect k1 68
 expect k4 15
 shot general.png
 tap GLO
+expect page 0
+# EXCITE, MOTION, WEB
+tap ENV
+expect page 2
+expect k1 10
+expect k2 64
+turn K1 1
+wait 100
+turn K1 1
+wait 100
+expect k1 80
+shot excite.png
+wav bow.wav
+wait 1500
+wavstop
+expect peak_db_min -30
+turn K1 -2
+wait 100
+expect k1 10
+tap LFO
+expect page 3
+turn K2 20
+wait 100
+shot motion.png
+tap SEL
+expect page 6
+expect k1 64
+expect k4 64
+shot web.png
+tap SEL
 expect page 0
 # another instrument
 tapkey b5
