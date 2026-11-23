@@ -41,10 +41,27 @@ const macro_t CHAOS_KNOB = {"CHAOS", 4, {16, 48, 80, 112}, {"CHAIN", "RING", "ST
 const char *const WEB_NAME[4] = {"CHAIN", "RING", "STAR", "MESH"};
 int eng_topology(int chaos) { return chaos < 32 ? 0 : chaos < 64 ? 1 : chaos < 96 ? 2 : 3; }
 
-/* the FX page: BPM's zones are tempos (the knob's value is the BPM minus 60, 0..127 = 60..187; 200 past it) */
+/* the FX page: the master's effects */
 const macro_t MASTER_KNOB[4] = {
-    {"BPM", 5, {50, 60, 80, 110, 114}, {"110", "120", "140", "170", "174"}},
-    {"SWING", 3, {0, 30, 60}, {"STRAIGHT", "SHUFFLE", "DRUNK"}},
     {"DRIVE", 4, {0, 40, 85, 127}, {"CLEAN", "GLUE", "HOT", "MELT"}},
     {"SPACE", 4, {0, 35, 75, 120}, {"DRY", "ROOM", "HALL", "VOID"}},
+    {"PITCH", 5, {0, 32, 64, 96, 127}, {"-12", "-5", "0", "+7", "+12"}},
+    {"GLITCH", 4, {0, 40, 85, 127}, {"OFF", "SKIP", "STUTTER", "SHRED"}},
+};
+
+/* the ENGINE page: each instrument's own effects */
+const macro_t ENGINE_KNOB[4] = {
+    {"FM", 4, {0, 40, 85, 127}, {"OFF", "WARBLE", "BELL", "NOISE"}},
+    {"GRAIN", 4, {0, 40, 85, 127}, {"OFF", "HAZE", "CLOUD", "SPRAY"}},
+    {"FILTER", 5, {0, 32, 64, 96, 127}, {"DARK", "LOW", "OPEN", "THIN", "AIR"}},
+    {"CHAOS", 4, {0, 40, 85, 127}, {"STILL", "LOOSE", "BOUNCE", "AVALANCHE"}},
+};
+
+/* the GENERAL page: the clock (BPM: the knob's value + 60), the swing, the drift off the grid, the picked track's
+ * length (the knob's value: steps - 1) */
+const macro_t GENERAL_KNOB[4] = {
+    {"BPM", 5, {30, 50, 60, 80, 114}, {"90", "110", "120", "140", "174"}},
+    {"SWING", 3, {0, 30, 60}, {"STRAIGHT", "SHUFFLE", "DRUNK"}},
+    {"DRIFT", 4, {0, 40, 85, 127}, {"GRID", "HUMAN", "LOOSE", "FREE"}},
+    {"LENGTH", 6, {6, 11, 15, 31, 47, 63}, {"7", "12", "16", "32", "48", "64"}},
 };

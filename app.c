@@ -8,14 +8,16 @@
  *   black keys 1-6  the six instruments (KICK SNARE HATS GLITCH PERC BASS): a key picks it (and plays it while the
  *                   sequencer is stopped); SEQ held + a key: muted / back
  *   white keys      the picked instrument's 16 steps on the page shown: a tap turns a step on, again ACCENT, again off
- *   K1..K4          the picked instrument's four knobs (FX: BPM, SWING, DRIVE, SPACE); turned slowly each rests a few
- *                   detents on its sweetspots
+ *   K1..K4          the page's four knobs; turned slowly each rests a few detents on its sweetspots. The pages:
+ *                   HOME the instrument's SOUND, EDIT its ENGINE (FM, GRAIN, FILTER, CHAOS: its bounces), FX the
+ *                   master's (DRIVE, SPACE, PITCH, GLITCH), GLO the GENERAL page (BPM, SWING, DRIFT, the track's
+ *                   LENGTH). The same button again: back to SOUND
  *   SELECT          MASS: FEATHER .. BLACK HOLE (light and nervous .. heavy, slow and dirty)
  *   ALGORITHM       CHAOS: the web's ties (CHAIN, RING, STAR, MESH) and how hard every hit pushes
- *   PRESET          the eight patterns: turn, and it changes at the top of the next loop (stopped: at once)
- *   FX              the master page (again: back).   HOME: the instrument's page
+ *   PRESET          the eight patterns: turn, and it takes over on the next beat, from its top (stopped: at once)
  *   HOME held 1 s   the pattern back to its factory state
- *   SEQ             the length: 16, 32, 48, 64 steps (a new bar starts as a copy of the first)
+ *   SEQ             the picked track's length: 16, 32, 48, 64 steps (a new bar starts as a copy of the first); each
+ *                   track has its own length (LENGTH on GENERAL: 1 .. 64), so tracks run against each other
  *   OCT- / OCT+     the page of steps shown (1-16 .. 49-64)
  *   PLAY            start from step 1 / stop.   REC held 1 s: the picked instrument's steps cleared
  *   MIDI in (USB, TRS): clock, START, CONTINUE, STOP: COLLAPSE follows; notes 36-41 play the six instruments.
@@ -23,7 +25,7 @@
 #include "fastmath.h"
 #include "engine.h"
 
-#define SET_MAGIC 0x31434F43u            /* "COC1": the settings record; another magic loads the factory patterns */
+#define SET_MAGIC 0x32434F43u            /* "COC2": the settings record; another magic loads the factory patterns */
 typedef struct {
     uint32_t magic;
     pattern_t pat[NPATTERNS];
@@ -65,16 +67,21 @@ static void factory_load(uint32_t i)     /* pattern slot i from its factory stat
     p->swing = f->swing;
     p->mass = f->mass;
     p->chaos = f->chaos;
-    p->length = f->length;
+    p->drift = f->drift;
     p->drive = f->drive;
     p->space = f->space;
+    p->pitch = f->pitch;
+    p->glitch = f->glitch;
     for (t = 0; t < NINST; t++) {
         track_t *tr = &p->tr[t];
-        for (k = 0; k < 4u; k++)
+        for (k = 0; k < 4u; k++) {
             tr->p[k] = f->p[t][k];
+            tr->fx[k] = f->fx[t][k];
+        }
         tr->level = f->level[t];
         for (s = 0; s < NSTEPS && f->steps[t][s]; s++)
             set_step(tr, (int)s, f->steps[t][s] != '.', f->steps[t][s] == 'X');
+        tr->len = (uint8_t)(s ? s : 16u);   /* the string's length is the track's */
     }
 }
 
@@ -97,14 +104,13 @@ static int settings_ok(void)
     for (i = 0; i < NPATTERNS; i++) {
         const pattern_t *p = &set.pat[i];
         if (p->mass > 127u || p->chaos > 127u || p->bpm < 60u || p->bpm > 187u || p->swing > 127u
-            || p->drive > 127u || p->space > 127u
-            || (p->length != 16u && p->length != 32u && p->length != 48u && p->length != 64u))
+            || p->drive > 127u || p->space > 127u || p->drift > 127u || p->pitch > 127u || p->glitch > 127u)
             return 0;
         for (t = 0; t < NINST; t++) {
             for (k = 0; k < 4u; k++)
-                if (p->tr[t].p[k] > 127u)
+                if (p->tr[t].p[k] > 127u || p->tr[t].fx[k] > 127u)
                     return 0;
-            if (p->tr[t].level > 127u)
+            if (p->tr[t].level > 127u || p->tr[t].len < 1u || p->tr[t].len > 64u)
                 return 0;
         }
     }
@@ -133,7 +139,8 @@ static void settings_save(void)
 /* A knob's position runs past each sweetspot REST detents more than its value: turned slowly, it rests on the zone for
  * those detents (a soft notch); turned fast, it runs past. */
 #define REST 5
-enum { PG_SOUND, PG_MASTER };
+enum { PG_SOUND, PG_ENGINE, PG_FX, PG_GENERAL, NPAGES };
+static const char *const PAGE_NAME[NPAGES] = {"SOUND", "ENGINE", "FX", "GENERAL"};
 
 static int32_t pos_max(const macro_t *mc) { return 127 + mc->nzones * REST; }
 
@@ -279,31 +286,51 @@ void app_say(const char *a, const char *b)
     }
 }
 
-/* the page's knobs: the instrument's, or the master's (BPM is the knob's value + 60) */
-static const macro_t *page_knob(int k) { return ui.page == PG_SOUND ? &IN.knob[k] : &MASTER_KNOB[k]; }
+/* the page's knobs: the instrument's SOUND and ENGINE, the master's FX, the GENERAL page (BPM: the knob's value + 60;
+ * LENGTH: the picked track's steps - 1) */
+static const macro_t *page_knob(int k)
+{
+    switch (ui.page) {
+    case PG_ENGINE: return &ENGINE_KNOB[k];
+    case PG_FX: return &MASTER_KNOB[k];
+    case PG_GENERAL: return &GENERAL_KNOB[k];
+    default: return &IN.knob[k];
+    }
+}
+static uint8_t *page_byte(int k)
+{
+    switch (ui.page) {
+    case PG_ENGINE: return &TR.fx[k];
+    case PG_FX: return k == 0 ? &PT.drive : k == 1 ? &PT.space : k == 2 ? &PT.pitch : &PT.glitch;
+    case PG_GENERAL: return k == 0 ? &PT.bpm : k == 1 ? &PT.swing : k == 2 ? &PT.drift : &TR.len;
+    default: return &TR.p[k];
+    }
+}
 static int32_t knob_val(int k)
 {
-    if (ui.page == PG_SOUND)
-        return TR.p[k];
-    switch (k) {
-    case 0: return PT.bpm - 60;
-    case 1: return PT.swing;
-    case 2: return PT.drive;
-    default: return PT.space;
-    }
+    int32_t v = *page_byte(k);
+    if (ui.page == PG_GENERAL && k == 0)
+        return v - 60;
+    if (ui.page == PG_GENERAL && k == 3)
+        return v - 1;
+    return v;
 }
 static void knob_store(int k, int32_t v)
 {
-    if (ui.page == PG_SOUND) {
-        TR.p[k] = (uint8_t)v;
-        return;
+    if (ui.page == PG_GENERAL && k == 0)
+        v += 60;
+    if (ui.page == PG_GENERAL && k == 3) {
+        v += 1;
+        if (v > 64)
+            v = 64;
     }
-    switch (k) {
-    case 0: PT.bpm = (uint8_t)(v + 60); break;
-    case 1: PT.swing = (uint8_t)v; break;
-    case 2: PT.drive = (uint8_t)v; break;
-    default: PT.space = (uint8_t)v; break;
-    }
+    *page_byte(k) = (uint8_t)v;
+    if (ui.page == PG_GENERAL && k == 3 && ui.view * 16 >= v)
+        ui.view = 0;
+}
+static int knob_shows_number(int k)      /* BPM and LENGTH show their number, not a zone name, between zones */
+{
+    return ui.page == PG_GENERAL && (k == 0 || k == 3);
 }
 
 static void knobs_sync(void)
@@ -351,7 +378,7 @@ static void knob(int k, int32_t e)
     knob_store(k, v);
     dirty();
     if (za >= 0 && za != zone_at(mc, was))
-        big_show(mc->zone[za], mc->name, ui.page == PG_SOUND ? IN.rgb : RGB(93, 232, 224));
+        big_show(mc->zone[za], mc->name, ui.page <= PG_ENGINE ? IN.rgb : RGB(93, 232, 224));
 }
 
 /* SELECT and ALGORITHM: the web's two macros, with sweetspots too */
@@ -376,13 +403,15 @@ static void macro_turn(int which, int32_t e)
 
 static void page_set(int pg)
 {
+    static const char *const WHAT[NPAGES] = {"", "FM GRAIN FILTER CHAOS", "DRIVE SPACE PITCH GLITCH",
+                                             "BPM SWING DRIFT LENGTH"};
     ui.page = (uint8_t)pg;
     ui.big_until = 0;
     knobs_sync();
-    app_say(pg == PG_SOUND ? IN.name : "MASTER", pg == PG_SOUND ? "SOUND" : "BPM SWING DRIVE SPACE");
+    app_say(pg <= PG_ENGINE ? IN.name : PAGE_NAME[pg], pg == PG_SOUND ? "SOUND" : WHAT[pg]);
 }
 
-static int32_t len_steps(void) { return PT.length; }
+static int32_t len_steps(void) { return TR.len; }
 
 static void step_key(uint32_t i)         /* off -> on -> accent -> off */
 {
@@ -404,29 +433,29 @@ static void step_key(uint32_t i)         /* off -> on -> accent -> off */
     ui.redraw = 1;
 }
 
-static void length_next(void)            /* 16 -> 32 -> 48 -> 64 -> 16; a new bar starts as a copy of the first */
+static void length_next(void)            /* the picked track: 16 -> 32 -> 48 -> 64 -> 16 (or up to the next sixteen);
+                                          * a new bar starts as a copy of the first */
 {
-    int32_t l = PT.length, n = l >= 64 ? 16 : l + 16, t, s;
-    if (n > l)
-        for (t = 0; t < NINST; t++) {
-            track_t *tr = &PT.tr[t];
-            int empty = 1;
+    int32_t l = TR.len, n = l >= 64 ? 16 : (l / 16 + 1) * 16, s;
+    if (n > l && l >= 16) {
+        int empty = 1;
+        for (s = l; s < n; s++)
+            if (step_on(&TR, s))
+                empty = 0;
+        if (empty)
             for (s = l; s < n; s++)
-                if (step_on(tr, s))
-                    empty = 0;
-            if (empty)
-                for (s = 0; s < 16; s++)
-                    set_step(tr, l + s, step_on(tr, s), step_acc(tr, s));
-        }
-    PT.length = (uint8_t)n;
+                set_step(&TR, s, step_on(&TR, s % 16), step_acc(&TR, s % 16));
+    }
+    TR.len = (uint8_t)n;
     if (ui.view * 16 >= n)
         ui.view = 0;
+    knobs_sync();
     dirty();
     {
         char t[12];
         int_text(n, t);
         text_cat(t, " STEPS");
-        app_say("LENGTH", t);
+        app_say(IN.name, t);
     }
 }
 
@@ -443,8 +472,7 @@ static void inst_key(uint32_t i, uint32_t btn)
         eng_hit((int)i, 1.0f);
     if (set.sel != i) {
         set.sel = (uint8_t)i;
-        if (ui.page == PG_SOUND)
-            knobs_sync();
+        knobs_sync();
         dirty();
     }
     ui.redraw = 1;
@@ -483,7 +511,9 @@ static void button(uint32_t i)
         if (ui.page != PG_SOUND)
             page_set(PG_SOUND);
         break;
-    case B_FX: page_set(ui.page == PG_MASTER ? PG_SOUND : PG_MASTER); break;
+    case B_EDIT: page_set(ui.page == PG_ENGINE ? PG_SOUND : PG_ENGINE); break;
+    case B_FX: page_set(ui.page == PG_FX ? PG_SOUND : PG_FX); break;
+    case B_GLO: page_set(ui.page == PG_GENERAL ? PG_SOUND : PG_GENERAL); break;
     case B_SEQ:
         ui.seq_t = plat_ms();
         ui.seq_used = 0;
@@ -491,7 +521,7 @@ static void button(uint32_t i)
     case B_OCTDN:
     case B_OCTUP:
         if (len_steps() > 16) {
-            int32_t v = (int32_t)ui.view + (i == B_OCTUP ? 1 : -1), pages = len_steps() / 16;
+            int32_t v = (int32_t)ui.view + (i == B_OCTUP ? 1 : -1), pages = (len_steps() + 15) / 16;
             char t[12];
             ui.view = (uint8_t)clamp(v, 0, pages - 1);
             int_text(ui.view * 16 + 1, t);
@@ -575,7 +605,7 @@ static void input(void)
 static void lights(void)
 {
     uint32_t lit = 0, mid = 0, dim = 0, i, btn = 0, dimb;
-    int32_t s = eng_step();
+    int32_t s = eng_track_step(set.sel);
     for (i = 0; i < 16u; i++) {          /* the steps shown: accents lit, hits half */
         int32_t st = (int32_t)i + 16 * ui.view;
         uint32_t bit = 1u << WK[i];
@@ -601,8 +631,12 @@ static void lights(void)
     }
     if (eng_playing())
         btn |= LED_PLAY_GREEN;
-    btn |= 1u << (ui.page == PG_MASTER ? B_FX : B_HOME);
-    dimb = (1u << B_PLAY) | (1u << B_REC) | (1u << B_SEQ) | (1u << B_FX) | (1u << B_HOME);
+    {
+        static const uint8_t PB[NPAGES] = {B_HOME, B_EDIT, B_FX, B_GLO};
+        btn |= 1u << PB[ui.page];
+    }
+    dimb = (1u << B_PLAY) | (1u << B_REC) | (1u << B_SEQ) | (1u << B_FX) | (1u << B_HOME) | (1u << B_EDIT)
+           | (1u << B_GLO);
     if (len_steps() > 16)
         dimb |= (1u << B_OCTDN) | (1u << B_OCTUP);
     plat_lights(btn | (ui.btn & ~(1u << B_PLAY)), lit, dimb, dim, 1);
@@ -811,7 +845,7 @@ static void draw_sliders(int32_t y)
 static void draw_knobs(int32_t y, uint32_t now)
 {
     int32_t k;
-    uint16_t col = ui.page == PG_SOUND ? IN.rgb : LCD_HI;
+    uint16_t col = ui.page <= PG_ENGINE ? IN.rgb : LCD_HI;
     cv_rect(0, y, 240, 44, SK_STEEL);
     bevel(2, y, 236, 44, 1);
     for (k = 0; k < 4; k++) {
@@ -828,12 +862,12 @@ static void draw_knobs(int32_t y, uint32_t now)
             cv_rect(x + 3 + (mc->centre[i] * (w - 8)) / 127, y + 14, 1, 2, (int)i == z ? C_WHITE : SK_DARK);
         cv_rect(fx, y + 15, 7, 9, z >= 0 ? col : SK_LIGHT);
         bevel(fx, y + 15, 7, 9, 1);
-        if (hot && z < 0) {
-            int_text(ui.page == PG_MASTER && k == 0 ? v + 60 : v, t);
+        if (knob_shows_number(k)) {
+            int_text(k == 0 ? v + 60 : v + 1, t);
+            ctext(x + w / 2, y + 27, &FONT_XS, t, z >= 0 || hot ? C_WHITE : SK_DARK);
+        } else if (hot && z < 0) {
+            int_text(v, t);
             ctext(x + w / 2, y + 27, &FONT_XS, t, C_WHITE);
-        } else if (ui.page == PG_MASTER && k == 0) {
-            int_text(v + 60, t);
-            ctext(x + w / 2, y + 27, &FONT_XS, t, z >= 0 ? C_WHITE : SK_DARK);
         } else {
             ctext(x + w / 2, y + 27, &FONT_XS, mc->zone[z >= 0 ? z : zn], z >= 0 ? C_WHITE : SK_DARK);
         }
@@ -879,7 +913,10 @@ static void draw_playlist(int32_t y, int32_t s)
         cv_text(8, y + 17, &FONT_XS, t, LCD_MID);
         cv_text(232 - text_w(&FONT_XS, "NEXT"), y + 17, &FONT_XS, "NEXT", LCD_HI);
     } else {
-        int32_t x = cv_text(8, y + 17, &FONT_XS, IN.name, IN.rgb);
+        int32_t x = cv_text(8, y + 17, &FONT_XS, ui.page <= PG_ENGINE ? IN.name : PAGE_NAME[ui.page],
+                            ui.page <= PG_ENGINE ? IN.rgb : LCD_HI);
+        if (ui.page == PG_ENGINE)
+            x = cv_text(x + 6, y + 17, &FONT_XS, "ENGINE", LCD_HI);
         t[0] = 0;
         int_text(ui.view * 16 + 1, t);
         text_cat(t, "-");
@@ -919,7 +956,7 @@ static void draw_playlist(int32_t y, int32_t s)
 
 static void draw(uint32_t now)
 {
-    int32_t s = eng_step();
+    int32_t s = eng_track_step(set.sel);
     cv_begin(240, 120, SK_STEEL);
     draw_title(now);
     draw_time(17, now);
@@ -1112,8 +1149,10 @@ int app_expect(const char *what, int *got)
         *got = ui.muted;
     else if (!strcmp(what, "bpm"))
         *got = PT.bpm;
-    else if (!strcmp(what, "length"))
-        *got = PT.length;
+    else if (!strcmp(what, "length"))    /* the picked track's */
+        *got = TR.len;
+    else if (!strcmp(what, "tstep"))
+        *got = eng_track_step(set.sel);
     else if (!strcmp(what, "mass"))
         *got = PT.mass;
     else if (!strcmp(what, "chaos"))

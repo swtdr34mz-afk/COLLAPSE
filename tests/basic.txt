@@ -4,18 +4,18 @@ splashshot splash.png
 wait 400
 shot intro.png
 wait 1600
-# first start: pattern 1 (NEURO BREACH), KICK picked, 32 steps at 174
+# first start: pattern 1 (MARBLE RUN), KICK picked (its track 16 steps), 128 BPM
 expect cur 0
 expect sel 0
 expect page 0
-expect length 32
-expect bpm 174
-expect mass 80
-expect chaos 56
+expect length 16
+expect bpm 128
+expect mass 40
+expect chaos 72
 shot boot.png
 tap PLAY
 expect playing 1
-wav neuro.wav
+wav marble.wav
 wait 3000
 wavstop
 expect hits >20
@@ -24,20 +24,26 @@ expect energy >0
 shot playing.png
 # a step: on, accent, off
 tapkey w1
-expect steps 67175427
+expect steps 16643
 tapkey w1
-expect acc 66563
+expect acc 3
 tapkey w1
-expect steps 67175425
-# K1 slowly up from 70: it rests on PUNCH (80)
-turn K1 10
-wait 200
-expect p1 80
-expect zone1 2
+expect steps 16641
+# K1 slowly down from 52: it rests on DEEP (48)
+turn K1 -1
+wait 120
+turn K1 -1
+wait 120
+turn K1 -1
+wait 120
+turn K1 -1
+wait 120
+expect p1 48
+expect zone1 1
 shot sweetspot.png
 wait 900
 # MASS and CHAOS
-turn SELECT 20
+turn SELECT 70
 wait 100
 expect mass >95
 turn ALGO 60
@@ -45,71 +51,79 @@ wait 100
 expect chaos >95
 shot mesh.png
 wait 900
-# the master page
-tap FX
+# the pages: ENGINE, FX, GENERAL, back
+tap EDIT
 expect page 1
-expect k1 114
-shot master.png
+expect k4 20
+shot engine.png
 tap FX
+expect page 2
+expect k1 30
+shot master.png
+tap GLO
+expect page 3
+expect k1 68
+expect k4 15
+shot general.png
+tap GLO
 expect page 0
 # another instrument
 tapkey b5
 expect sel 5
 shot bass.png
-# the next pattern: queued while playing, then it plays
+# the next pattern: queued while playing, then it takes over on the next beat
 turn PRESET 1
-wait 800
+wait 750
 expect cur 1
 shot queued.png
-wait 2500
+wait 600
 expect queued 0
-expect bpm 140
-wav riddim.wav
+expect bpm 96
+wav spring.wav
 wait 3500
 wavstop
 expect peak_db_min -20
-shot riddim.png
+shot spring.png
 # every pattern makes a sound
 turn PRESET 1
 wait 3000
-wav glitchhop.wav
+wav foundry.wav
 wait 2500
 wavstop
 turn PRESET 1
 wait 3000
-wav lxr.wav
+wav gravity.wav
 wait 2500
 wavstop
 turn PRESET 1
 wait 3000
-wav jungle.wav
+wav clockwork.wav
 wait 2500
 wavstop
 turn PRESET 1
 wait 3000
-wav breaks.wav
+wav rain.wav
 wait 2500
 wavstop
 turn PRESET 1
 wait 3000
-wav micro.wav
+wav fracture.wav
 wait 2500
 wavstop
 turn PRESET 1
 wait 3000
-wav halftime.wav
+wav avalanche.wav
 wait 2500
 wavstop
-shot halftime.png
+shot avalanche.png
 expect cur 7
-# the length: 32 -> 48, the third bar a copy of the first
+# the picked track's length (BASS, 24): up to 32, the next page shown
+expect length 24
 tap SEQ
 wait 100
-expect length 48
+expect length 32
 tap OCT+
-tap OCT+
-expect view 2
-tap OCT-
+expect view 1
 tap OCT-
 # SEQ held + a key: a mute
 press SEQ
@@ -117,7 +131,7 @@ tapkey b0
 release SEQ
 wait 50
 expect muted 1
-expect length 48
+expect length 32
 press SEQ
 tapkey b0
 release SEQ
@@ -132,7 +146,7 @@ expect steps 0
 press HOME
 wait 1100
 release HOME
-expect length 32
+expect length 24
 expect steps >0
 # the settings kept across a restart
 wait 4500

@@ -130,7 +130,6 @@ uint32_t eng_hits(void) { return hits; }
 void eng_panic(void)
 {
     uint32_t t;
-    for (t = 0; t < NINST; t++)
     for (t = 0; t < NINST; t++) {        /* still, but tuned (another body may shake it before its first hit) */
         float p[4] = {64.0f, 64.0f, 64.0f, 30.0f};
         uint32_t ns = 1;
@@ -167,47 +166,105 @@ static float step_len(int32_t s)         /* swing: the even sixteenths long, the
     float sw = (float)PAT->swing * (0.33f / 127.0f);
     return step_base() * ((s & 1) ? 1.0f - sw : 1.0f + sw);
 }
-static int32_t pat_len(void)
+static int32_t trk_len(const track_t *tr) { return tr->len >= 1u && tr->len <= 64u ? tr->len : 16; }
+int eng_track_step(int inst)
 {
-    int32_t l = PAT->length;
-    return l == 32 || l == 48 || l == 64 ? l : 16;
+    int32_t s = step_now;
+    return s < 0 || !PAT ? -1 : (int)(s % trk_len(&PAT->tr[inst]));
 }
 
+/* What follows a hit, the physics of the rhythm (the sample's: no grid, clusters):
+ * DRIFT: the hit itself lands late, as far as the web has pushed the instrument (and a little chance): off the grid.
+ * BOUNCE: the instrument's own CHAOS (ENGINE page) is the chance that a hit bounces: it strikes again and again, each
+ * time sooner and softer, like a ball coming to rest (how soon the first, how many: MASS and its CHAOS). */
+#define NPEND 6
+static float pend_wait[NINST][NPEND], pend_vel[NINST][NPEND];
+static float bc_wait[NINST], bc_gap[NINST], bc_vel[NINST], bc_e[NINST];
 
-static float rt_wait[NINST], rt_vel[NINST];   /* a stutter's second hit: samples to it (0: none) */
+static void later(int t, float wait, float vel)
+{
+    int k;
+    for (k = 0; k < NPEND; k++)
+        if (pend_wait[t][k] <= 0.0f) {
+            pend_wait[t][k] = wait;
+            pend_vel[t][k] = vel;
+            return;
+        }
+}
+
 static void play_step(int32_t s, uint32_t at)
 {
     uint32_t t;
-    float ch = (float)PAT->chaos;
+    float sb = step_base(), dr = (float)PAT->drift / 127.0f, mass = (float)PAT->mass / 127.0f;
     step_now = s;
     for (t = 0; t < NINST; t++) {
         const track_t *tr = &PAT->tr[t];
-        float vel;
-        if (!step_on(tr, s) || (muted >> t & 1u))
+        int32_t ts = s % trk_len(tr);
+        float vel, delay, c = (float)tr->fx[FX_CHAOS] / 127.0f;
+        if (!step_on(tr, ts) || (muted >> t & 1u))
             continue;
-        vel = step_acc(tr, s) ? 1.0f : 0.68f;
-        push_ev((int)t, at, vel);
-        /* CHAOS at the top: SNARE, HATS, GLITCH and PERC sometimes stutter (a second hit in the step) */
-        if (ch > 100.0f && t != I_KICK && t != I_BASS
-            && 0.5f + 0.5f * white(&seq_noise) < (ch - 100.0f) * (0.4f / 27.0f)) {
-            rt_wait[t] = step_base() * 0.5f;
-            rt_vel[t] = vel * 0.7f;
+        vel = step_acc(tr, ts) ? 1.0f : 0.68f;
+        delay = sb * 0.6f * dr * dr
+                * fm_clampf(0.35f * rnd01() + 0.65f * (fm_fabsf(wd[t][1]) + fm_fabsf(wd[t][2])) * (1.0f / 40.0f), 0.0f, 1.0f);
+        if (delay < 1.0f)
+            push_ev((int)t, at, vel);
+        else
+            later((int)t, (float)at + delay, vel);
+        if (c > 0.0f && rnd01() < c * c * 0.9f + 0.1f * c) {   /* a bounce: its first rebound, its fall */
+            bc_gap[t] = sb * (1.1f - 0.7f * mass) * (0.55f + 0.45f * rnd01());
+            bc_e[t] = 0.5f + 0.42f * c - 0.1f * mass;
+            bc_vel[t] = vel * (0.6f + 0.3f * c);
+            bc_wait[t] = delay + bc_gap[t];
         }
     }
 }
 
-static void next_pattern(void)           /* at the top of a loop */
+static int next_pattern(void)            /* on a beat: the pattern waiting takes over, from its top (1: it did) */
 {
-    if (pat_next) {
-        PAT = (const pattern_t *)pat_next;
-        pat_next = 0;
-    }
+    if (!pat_next)
+        return 0;
+    PAT = (const pattern_t *)pat_next;
+    pat_next = 0;
+    return 1;
+}
+
+/* GLITCH (the master's): at a step, by chance (more the further it is turned), the last slice of the mix is caught
+ * and repeated for a step or two, sometimes backwards; turned up the slices get shorter (SKIP, STUTTER, SHRED) */
+#define GL_N 8192u
+static int16_t gl_buf[2][GL_N] PLAT_POOL;
+static uint32_t gl_w, gl_start, gl_len, gl_pos, gl_left, gl_at = 0xFFFFu;
+static uint8_t gl_rev;
+static uint32_t gl_noise = 0x7F4A7C15u;
+static void glitch_maybe(uint32_t at)
+{
+    float g = (float)PAT->glitch / 127.0f, r = 0.5f + 0.5f * white(&gl_noise), sb = step_base(), len;
+    if (g < 0.02f || gl_left || r > 0.08f + 0.5f * g * g)
+        return;
+    r = 0.5f + 0.5f * white(&gl_noise);
+    len = sb * (r < 0.5f - 0.3f * g ? 0.5f : r < 0.85f - 0.2f * g ? 0.25f : 0.125f);
+    gl_len = (uint32_t)fm_clampf(len, 256.0f, (float)GL_N * 0.9f);
+    gl_left = (uint32_t)(sb * (r < 0.6f ? 1.0f : 2.0f));
+    gl_rev = (0.5f + 0.5f * white(&gl_noise)) < 0.25f * g;
+    gl_at = at;
+}
+
+/* one step of the clock (internal or MIDI): the next pattern on a beat, then the step */
+static void clock_step(uint32_t at)
+{
+    glitch_maybe(at);
+    if (pat_next && (step_pos & 3) == 0 && next_pattern())
+        step_pos = 0;
+    play_step(step_pos, at);
+    step_pos++;
+    if (step_pos >= 0x40000000)
+        step_pos = 0;
 }
 
 /* the sequencer over the block: where each instrument is struck */
 static void sequence(uint32_t n)
 {
     uint32_t i, t;
+    int k;
     for (t = 0; t < NINST; t++)
         nev[t] = 0;
     if (hit_req) {
@@ -236,34 +293,31 @@ static void sequence(uint32_t n)
         plat_unlock(f);
         ext_quiet = 0;
         while (c--) {
-            if (ext_run && ext_count % 6u == 0u) {
-                if (step_pos >= pat_len())
-                    step_pos = 0;
-                if (step_pos == 0)
-                    next_pattern();
-                play_step(step_pos, 0);
-                step_pos++;
-            }
+            if (ext_run && ext_count % 6u == 0u)
+                clock_step(0);
             ext_count++;
         }
     } else if (ext_quiet < 0x7FFFFFFFu) {
         ext_quiet += n;
     }
     for (i = 0; i < n; i++) {
-        for (t = 0; t < NINST; t++)
-            if (rt_wait[t] > 0.0f && (rt_wait[t] -= 1.0f) <= 0.0f)
-                push_ev((int)t, i, rt_vel[t]);
+        for (t = 0; t < NINST; t++) {
+            for (k = 0; k < NPEND; k++)  /* the hits drifted late */
+                if (pend_wait[t][k] > 0.0f && (pend_wait[t][k] -= 1.0f) <= 0.0f)
+                    push_ev((int)t, i, pend_vel[t][k]);
+            if (bc_wait[t] > 0.0f && (bc_wait[t] -= 1.0f) <= 0.0f) {   /* a bounce */
+                push_ev((int)t, i, bc_vel[t]);
+                bc_gap[t] *= bc_e[t];
+                bc_vel[t] *= 0.55f + 0.4f * bc_e[t];
+                bc_wait[t] = bc_vel[t] < 0.08f || bc_gap[t] < 250.0f ? 0.0f : bc_gap[t];
+            }
+        }
         if (!running)
             continue;
         step_left -= 1.0f;
         if (step_left <= 0.0f) {
-            if (step_pos >= pat_len())
-                step_pos = 0;
-            if (step_pos == 0)
-                next_pattern();
-            play_step(step_pos, i);
-            step_left += step_len(step_pos);
-            step_pos++;
+            clock_step(i);
+            step_left += step_len(step_pos - 1);
         }
     }
 }
@@ -331,7 +385,11 @@ void eng_init(void)
     }
     pat0.mass = pat0.chaos = 64;
     pat0.bpm = 124;
-    pat0.length = 16;
+    for (t = 0; t < NINST; t++) {
+        pat0.tr[t].len = 16;
+        pat0.tr[t].fx[FX_FILTER] = 64;
+    }
+    pat0.pitch = 64;
     PAT = &pat0;
     web_topology(eng_topology(64));
     {                                    /* the bodies tuned before their first hit: another may shake them first */
@@ -346,6 +404,102 @@ void eng_init(void)
 static float ibuf[NINST][BLK_MAX];
 static uint32_t blk_n;
 static float couple;                     /* how hard the bodies shake each other (CHAOS) */
+
+/* ------------------------------------------------- each instrument's effects --- */
+/* The ENGINE page, after the body:
+ * FM: the sound read from a short line whose length swings at audio rate (phase modulation: sidebands); turned up the
+ *     swing gets faster and deeper, from a warble to bells to noise.
+ * GRAIN: the last 46 ms kept, two grains read from it at random places, at half, the same or twice the speed, in
+ *     windows: a haze, a cloud, a spray.
+ * FILTER: a state variable filter, low-pass below the middle, high-pass above, a little resonance at the ends. */
+#define FM_N 256u
+#define GR_N 2048u
+typedef struct {
+    float fm_buf[FM_N];
+    uint32_t fm_w;
+    float fm_ph, fm_inc, fm_depth;
+    int16_t gr_buf[GR_N];
+    uint32_t gr_w;
+    float g_pos[2], g_rate[2], g_ph[2], g_inc, g_mix;
+    svf_c flt;
+    svf_s flt_s;
+    int flt_mode;                        /* 0 none, 1 low-pass, 2 high-pass */
+    uint32_t ns;
+} inst_fx_t;
+static inst_fx_t IFX[NINST] PLAT_POOL;
+
+static void ifx_block(int t)             /* the knobs to coefficients, once a block */
+{
+    inst_fx_t *x = &IFX[t];
+    const uint8_t *f = PAT->tr[t].fx;
+    float fm = (float)f[FX_FM] / 127.0f, gr = (float)f[FX_GRAIN] / 127.0f, fl = (float)f[FX_FILTER];
+    if (!x->ns)
+        x->ns = 0x51ED270Bu + 0x9E3779B9u * (uint32_t)t;
+    x->fm_depth = fm < 0.02f ? 0.0f : 2.0f + 60.0f * fm * fm;                    /* samples */
+    x->fm_inc = (6.0f * fm_exp2f(fm * 9.0f)) / ENG_SR;                       /* 6 Hz .. 3 kHz */
+    x->g_mix = gr < 0.02f ? 0.0f : 0.3f + 0.7f * gr;
+    x->g_inc = (8.0f + 50.0f * gr) / ENG_SR;                                 /* grains a second, each */
+    if (fl < 60.0f) {
+        x->flt_mode = 1;
+        svf_set(&x->flt, 150.0f * fm_exp2f(fl / 60.0f * 7.0f), fl < 20.0f ? 2.0f : 0.8f);
+    } else if (fl > 68.0f) {
+        x->flt_mode = 2;
+        svf_set(&x->flt, 40.0f * fm_exp2f((fl - 68.0f) / 59.0f * 7.0f), fl > 110.0f ? 2.0f : 0.8f);
+    } else {
+        x->flt_mode = 0;
+    }
+}
+
+static inline float ifx_run(int t, float y)
+{
+    inst_fx_t *x = &IFX[t];
+    if (x->fm_depth > 0.0f) {            /* FM: a line swung at audio rate */
+        float d, fr, a, b;
+        uint32_t r0;
+        x->fm_buf[x->fm_w] = y;
+        x->fm_ph += x->fm_inc;
+        if (x->fm_ph >= 1.0f)
+            x->fm_ph -= 1.0f;
+        d = 1.0f + x->fm_depth * (1.0f + fm_sin_turns(x->fm_ph));
+        d = (float)x->fm_w - d + (float)FM_N;
+        r0 = (uint32_t)d;
+        fr = d - (float)r0;
+        a = x->fm_buf[r0 & (FM_N - 1u)];
+        b = x->fm_buf[(r0 + 1u) & (FM_N - 1u)];
+        x->fm_w = (x->fm_w + 1u) & (FM_N - 1u);
+        y = a + fr * (b - a);
+    }
+    if (x->g_mix > 0.0f) {               /* GRAIN: two grains from the last 46 ms */
+        float g = 0.0f;
+        int k;
+        x->gr_buf[x->gr_w] = (int16_t)(fm_clampf(y, -1.0f, 1.0f) * 32767.0f);
+        for (k = 0; k < 2; k++) {
+            float w, pos;
+            uint32_t r0;
+            x->g_ph[k] += x->g_inc;
+            if (x->g_ph[k] >= 1.0f) {    /* a new grain: somewhere behind, a speed of half, one or two */
+                float r = 0.5f + 0.5f * white(&x->ns);
+                x->g_ph[k] -= 1.0f;
+                x->g_pos[k] = (float)x->gr_w - 200.0f - r * 1500.0f;
+                x->g_rate[k] = r < 0.3f ? 0.5f : r < 0.75f ? 1.0f : 2.0f;
+            }
+            pos = x->g_pos[k];
+            x->g_pos[k] += x->g_rate[k];
+            while (pos < 0.0f)
+                pos += (float)GR_N;
+            r0 = (uint32_t)pos & (GR_N - 1u);
+            w = fm_sin_turns(x->g_ph[k] * 0.5f);   /* the window: half a sine */
+            g += (float)x->gr_buf[r0] * (1.0f / 32768.0f) * w * w;
+        }
+        x->gr_w = (x->gr_w + 1u) & (GR_N - 1u);
+        y += x->g_mix * (g * 1.2f - 0.5f * y);
+    }
+    if (x->flt_mode) {
+        float lp, bp, hp = svf_run(&x->flt, &x->flt_s, y, &lp, &bp);
+        y = x->flt_mode == 1 ? lp : hp;
+    }
+    return y;
+}
 
 static void body_hit(int t, const float *p, float vel, uint32_t *ns)
 {
@@ -378,11 +532,13 @@ static void render_inst(int t)
     float *out = ibuf[t], pk = 0.0f, gain[NINST];
     const float *src[NINST];
     uint32_t i, e = 0, n = blk_n, ns = 0, a;
+    float own = 0.25f + 1.5f * (float)PAT->tr[t].fx[FX_CHAOS] / 127.0f;   /* its CHAOS: how easily it is pushed */
+    ifx_block(t);
     for (a = 0; a < NINST; a++)          /* who pushes it */
         if (RANK[a] < RANK[t] && wtie[a][t] > 0.0f) {
             int now = a == I_KICK || (CORE_OF[a] == CORE_OF[t] && ORDER[a] < ORDER[t]);
             src[ns] = now ? ibuf[a] : prevbuf[a];
-            gain[ns++] = couple * SENS[t] * wtie[a][t];
+            gain[ns++] = couple * SENS[t] * wtie[a][t] * own;
         }
     for (i = 0; i < n; i++) {
         float y, m, push = 0.0f;
@@ -401,6 +557,7 @@ static void render_inst(int t)
         case I_PERC: y = perc_body_sample(&s->body.p, push); break;
         default: y = bass_body_sample(&s->body.b, push); break;
         }
+        y = ifx_run(t, y);
         m = fm_fabsf(y);
         if (m > pk)
             pk = m;
@@ -444,8 +601,20 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
         step_now = -1;
     if (step_now < 0 && pat_next)
         next_pattern();
+    if (step_now < 0)                    /* stopped: what was drifting or bouncing is let go */
+        for (t = 0; t < NINST; t++) {
+            bc_wait[t] = 0.0f;
+            for (k = 0; k < NPEND; k++)
+                pend_wait[t][k] = 0.0f;
+        }
     g_step = step_base();
     master_block();
+    {                                    /* PITCH: time in the bodies, faster or slower */
+        static const bp_t P_PITCH[] = {{0, -12.0f}, {32, -5.0f}, {64, 0.0f}, {96, 7.0f}, {127, 12.0f}};
+        float dil = fm_exp2f(CURVE(P_PITCH, PAT->pitch) / 12.0f);
+        g_wscale = dil / ENG_SR;
+        g_tscale = ENG_SR / dil;
+    }
     sequence(n);
     if (slam_req) {
         slam_req = 0;
@@ -503,6 +672,28 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
         if (fx.d_g > 1.01f) {            /* DRIVE: the whole beat into a tanh */
             L = fm_tanhf(L * fx.d_g) * fx.d_norm;
             R = fm_tanhf(R * fx.d_g) * fx.d_norm;
+        }
+        /* GLITCH: the mix kept; a slice of it repeated while one is caught */
+        if (PAT->glitch || gl_left) {
+            gl_buf[0][gl_w] = (int16_t)(fm_clampf(L, -1.0f, 1.0f) * 32767.0f);
+            gl_buf[1][gl_w] = (int16_t)(fm_clampf(R, -1.0f, 1.0f) * 32767.0f);
+            if (gl_at == i) {            /* caught: the slice that just went by */
+                gl_start = (gl_w + GL_N - gl_len) % GL_N;
+                gl_pos = 0;
+                gl_at = 0xFFFFu;
+            }
+            if (gl_left && gl_at == 0xFFFFu) {
+                uint32_t o = gl_rev ? gl_len - 1u - gl_pos : gl_pos, r = (gl_start + o) % GL_N;
+                float e = fm_minf(1.0f, (float)fm_minf((float)gl_pos, (float)(gl_len - gl_pos)) * (1.0f / 64.0f));
+                float g = e * (1.0f / 32768.0f);
+                L = (float)gl_buf[0][r] * g;
+                R = (float)gl_buf[1][r] * g;
+                if (++gl_pos >= gl_len)
+                    gl_pos = 0;
+                gl_left--;
+            }
+            if (++gl_w >= GL_N)
+                gl_w = 0;
         }
         /* the limiter: clean below 0.6, rounded off above, never over full scale */
         if (fm_fabsf(L) > 0.6f) {

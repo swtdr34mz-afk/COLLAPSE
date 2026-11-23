@@ -28,6 +28,11 @@
  * Part of dsp/engine.c (included there). */
 /* ============================================================ the bodies === */
 static float g_step;                     /* samples a step, now (the render's: the BASS's wobble follows it) */
+/* PITCH, as Anukari's: time in the bodies runs faster or slower. Every frequency is scaled by it and every decay
+ * shortened by it, as if the body were played back faster: (w = 2 pi f g_wscale, a decay of tau seconds lasts
+ * tau g_tscale samples) */
+static float g_wscale = 1.0f / ENG_SR, g_tscale = ENG_SR;
+#define WMAX 1.2f                        /* (a spring never rings above this w, whatever PITCH does: stable) */
 static inline float k01(float v) { return fm_clampf(v, 0.0f, 127.0f) * (1.0f / 127.0f); }
 
 #define KR 6                             /* a head's ring */
@@ -49,7 +54,7 @@ typedef struct {
  * the ring's decay (s) */
 static void head_set(head_t *b, float f0, float ratio, float sweep, float drag, float decay, float ring_decay)
 {
-    float w0 = FM_TWO_PI * f0 / ENG_SR, wr = w0 * ratio, r2 = sweep * sweep;
+    float w0 = FM_TWO_PI * f0 * g_wscale, wr = w0 * ratio, r2 = sweep * sweep;
     b->w0 = w0;
     b->k0 = w0 * w0;
     b->nl = (r2 - 1.0f) * r2 * r2 / (0.81f * 0.81f);   /* y^2 (1 + nl y^4) = v^2 at the top of a full hit (v ~0.9) */
@@ -59,8 +64,8 @@ static void head_set(head_t *b, float f0, float ratio, float sweep, float drag, 
     b->ks = b->k0 * 0.06f;
     b->kg = b->k0 - (float)KR * b->ks;   /* (the ties to the ring stiffen the centre: the ground less) */
     b->kn = b->kr * 0.4f;
-    b->d0 = fm_expf(-1.0f / (decay * ENG_SR));
-    b->dr = fm_expf(-1.0f / (ring_decay * ENG_SR));
+    b->d0 = fm_expf(-1.0f / (decay * g_tscale));
+    b->dr = fm_expf(-1.0f / (ring_decay * g_tscale));
 }
 
 static void head_strike(head_t *b, float vel, float len, float pos, uint32_t *ns)
@@ -173,10 +178,10 @@ static void snare_body_hit(snare_body_t *b, const float *p, float vel, uint32_t 
     head_set(&b->h, f0, 1.59f, 1.35f, 0.01f, 0.05f + 0.25f * decay, 0.03f + 0.08f * decay);
     b->h.mic_ring = 0.5f;
     for (i = 0; i < NW; i++) {
-        float w = FM_TWO_PI * WIRE_HZ[i] * wt / ENG_SR;
+        float w = fm_minf(FM_TWO_PI * WIRE_HZ[i] * wt * g_wscale, WMAX);
         b->wk[i] = w * w;
     }
-    b->wd = fm_expf(-1.0f / ((0.004f + 0.03f * decay + 0.02f * snap) * ENG_SR));
+    b->wd = fm_expf(-1.0f / ((0.004f + 0.03f * decay + 0.02f * snap) * g_tscale));
     b->kc = 0.6f;
     b->gap = 0.02f * (1.0f - snap);      /* tight wires (SNAP up): touching at once */
     b->rough = 0.3f + 1.2f * snap;
@@ -236,12 +241,12 @@ static void hats_body_hit(hats_body_t *b, const float *p, float vel, uint32_t *n
     float t = fm_exp2f((tune - 0.5f) * 1.0f);
     int i;
     for (i = 0; i < NP; i++) {
-        float w = FM_TWO_PI * fm_minf(PLATE_HZ[i] * t * (1.0f + 0.01f * white(ns)), 8000.0f) / ENG_SR;
+        float w = fm_minf(FM_TWO_PI * PLATE_HZ[i] * t * (1.0f + 0.01f * white(ns)) * g_wscale, WMAX);
         b->k[i] = w * w;
     }
     b->kc = 0.01f + 0.08f * metal;
     b->nl = 2.0f + 60.0f * metal * metal;
-    b->d = fm_expf(-1.0f / ((0.012f + 0.6f * decay * decay * decay) * ENG_SR));
+    b->d = fm_expf(-1.0f / ((0.012f + 0.6f * decay * decay * decay) * g_tscale));
     b->m_len = b->m_left = 3.0f;
     b->m_amp = 2.0f * 1.6f * vel / 3.0f;
     b->hp_a = onepole(3000.0f * t);
@@ -320,9 +325,9 @@ static void perc_body_hit(perc_body_t *b, const float *p, float vel, uint32_t *n
     r[1] = CURVE(P_R1, p[2]);
     r[2] = CURVE(P_R2, p[2]);
     for (i = 0; i < 3; i++) {
-        float w = FM_TWO_PI * fm_minf(f * r[i], 8000.0f) / ENG_SR;
+        float w = fm_minf(FM_TWO_PI * f * r[i] * g_wscale, WMAX);
         b->k[i] = w * w;
-        b->d[i] = fm_expf(-1.0f / (tau / fm_sqrtf(r[i]) * ENG_SR));   /* the higher modes die sooner */
+        b->d[i] = fm_expf(-1.0f / (tau / fm_sqrtf(r[i]) * g_tscale));   /* the higher modes die sooner */
     }
     b->kc = b->k[0] * 0.05f;
     b->m_len = b->m_left = 2.0f + 30.0f * (1.0f - k01(p[2]));        /* glass: a hard little stick, wood: soft */
@@ -377,11 +382,11 @@ typedef struct {
 static void bass_body_hit(bass_body_t *b, const float *p, float vel, uint32_t *ns)
 {
     float semi = fm_floorf(CURVE(B_NOTE, p[0]) + 0.5f), decay = k01(p[1]), wo = k01(p[2]), dirt = k01(p[3]);
-    float f = 41.2034f * fm_exp2f(semi / 12.0f), w1 = FM_TWO_PI * f / ENG_SR, sk = w1 * (float)(NS + 1) / FM_PI;
+    float f = 41.2034f * fm_exp2f(semi / 12.0f), w1 = FM_TWO_PI * f * g_wscale, sk = w1 * (float)(NS + 1) / FM_PI;
     (void)ns;
     b->k = sk * sk;
     b->nl = 0.3f + 2.5f * dirt;
-    b->d = fm_expf(-1.0f / ((0.15f + 3.5f * decay * decay) * ENG_SR));
+    b->d = fm_expf(-1.0f / ((0.15f + 3.5f * decay * decay) * g_tscale));
     b->dh = 0.0002f + 0.004f * (1.0f - dirt);   /* clean: the highs die fast (round); dirty: they ring (growl) */
     b->m_at = 2;
     b->m_len = b->m_left = 30.0f - 22.0f * dirt;
@@ -458,14 +463,14 @@ typedef struct {
 static void glitch_body_hit(glitch_body_t *b, const float *p, float vel, uint32_t *ns)
 {
     float rate = k01(p[0]), pitch = k01(p[1]), len = k01(p[2]), crush = k01(p[3]);
-    float ts = (0.003f + 0.07f * (1.0f - rate) * (1.0f - rate)) * ENG_SR, vimp = 0.4f + 1.0f * vel;
-    float f = 150.0f * fm_exp2f(pitch * 5.2f), w = FM_TWO_PI * fm_minf(f, 6000.0f) / ENG_SR;
-    float w1 = FM_TWO_PI * fm_minf(f * 2.71f, 9000.0f) / ENG_SR;
+    float ts = (0.003f + 0.07f * (1.0f - rate) * (1.0f - rate)) * g_tscale, vimp = 0.4f + 1.0f * vel;
+    float f = 150.0f * fm_exp2f(pitch * 5.2f), w = fm_minf(FM_TWO_PI * f * g_wscale, 0.9f);
+    float w1 = fm_minf(FM_TWO_PI * f * 2.71f * g_wscale, WMAX);
     b->k0 = b->k0_set = w * w;
     b->k1 = w1 * w1;
     b->kc = b->k0 * 0.08f;
-    b->d0 = fm_expf(-1.0f / ((0.008f + 0.12f * len) * ENG_SR));
-    b->d1 = fm_expf(-1.0f / ((0.004f + 0.05f * len) * ENG_SR));
+    b->d0 = fm_expf(-1.0f / ((0.008f + 0.12f * len) * g_tscale));
+    b->d1 = fm_expf(-1.0f / ((0.004f + 0.05f * len) * g_tscale));
     b->e = 0.45f + 0.5f * len;
     b->g = vimp / ts;                    /* dropped from rest: it lands after ts samples at vimp */
     if (vel > 0.0f) {

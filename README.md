@@ -36,37 +36,43 @@ Two macros rule the web, on the two encoders left of the screen:
 Every knob rests a few detents on its sweetspots when turned slowly; the sweetspot's name lights up big in the display.
 The bass ducks under the kick.
 
+## The pages
+
+| Button | Page | K1 | K2 | K3 | K4 |
+| --- | --- | --- | --- | --- | --- |
+| HOME | **SOUND** (the instrument's body) | its four knobs (above) | | | |
+| EDIT | **ENGINE** (the instrument's own effects) | FM: OFF, WARBLE, BELL, NOISE | GRAIN: OFF, HAZE, CLOUD, SPRAY | FILTER: DARK, LOW, OPEN, THIN, AIR | CHAOS: STILL, LOOSE, BOUNCE, AVALANCHE |
+| FX | **FX** (the master) | DRIVE: CLEAN, GLUE, HOT, MELT | SPACE: DRY, ROOM, HALL, VOID | PITCH: -12, -5, 0, +7, +12 | GLITCH: OFF, SKIP, STUTTER, SHRED |
+| GLO | **GENERAL** | BPM | SWING: STRAIGHT, SHUFFLE, DRUNK | DRIFT: GRID, HUMAN, LOOSE, FREE | LENGTH: the picked track's steps, 1-64 |
+
+The same button again goes back to SOUND.
+
+- **FM**: the sound read from a short line whose length swings at audio rate (phase modulation): a warble, bells, noise.
+- **GRAIN**: two grains from the last 46 ms, at half, the same or twice the speed.
+- **CHAOS** (an instrument's own): how easily the web pushes it, and the chance that a hit **bounces**: it strikes again
+  and again, each time sooner and softer, like a ball coming to rest.
+- **PITCH**, as in Anukari: time in the bodies runs faster or slower. Every frequency and every decay moves together.
+- **GLITCH**: at a step, by chance, the last slice of the mix is caught and repeated for a step or two, sometimes backwards.
+- **DRIFT**: the hits land late, as far as the web has pushed the instrument: off the grid.
+- **LENGTH**: every track has its own length. A track of 7 against 12 against 16: the bar never comes round the same.
+
 ## The eight patterns
 
-Each with its own sounds, tempo, MASS and CHAOS. PRESET turns through them; while playing, the next one starts at the
-top of the loop. Edits stay in their slot; **HOME held 1 s** puts a pattern back to its factory state.
+Played like a physics instrument, not a drum machine (an Anukari recording was the reference: no grid to speak of,
+hits in clusters, tones ringing into each other, the weight in the low mids). Few steps; the bounces fill in. PRESET
+turns through them; while playing, the next one takes over **on the next beat**, from its top. Edits stay in their
+slot; **HOME held 1 s** puts a pattern back to its factory state.
 
-| # | Pattern | Genre | BPM | Steps |
+| # | Pattern | Character | BPM | Track lengths |
 | --- | --- | --- | --- | --- |
-| 1 | NEURO BREACH | DnB | 174 | 32 |
-| 2 | RIDDIM GRAVITY | Dubstep | 140 | 32 |
-| 3 | GLITCH HOP | Glitch | 105 | 16 |
-| 4 | LXR INDUSTRIAL | LXR | 130 | 16 |
-| 5 | JUNGLE FRACTURE | Jungle | 170 | 32 |
-| 6 | BREAK SHIFT | Breaks | 128 | 32 |
-| 7 | MICRO GLITCH | Minimal | 122 | 16 |
-| 8 | HALFTIME 174 | Halftime | 174 | 32 |
-
-## Controls
-
-| Control | What it does |
-| --- | --- |
-| Black keys 1-6 | The six instruments: a key picks it (and plays it while stopped). SEQ held + a key: mute |
-| White keys | The picked instrument's 16 steps on the page shown: a tap turns a step on, again ACCENT, again off |
-| K1..K4 | The instrument's four knobs; on the FX page BPM, SWING, DRIVE, SPACE |
-| SELECT / ALGORITHM | MASS / CHAOS |
-| PRESET | The eight patterns |
-| FX | The master page (again: back). HOME: the instrument's page |
-| HOME held 1 s | The pattern back to its factory state |
-| SEQ | The length: 16, 32, 48, 64 steps (a new bar starts as a copy of the first) |
-| OCT- / OCT+ | The page of steps shown (1-16 .. 49-64) |
-| PLAY | Start from step 1 / stop |
-| REC held 1 s | The picked instrument's steps cleared |
+| 1 | MARBLE RUN | bouncing, tonal | 128 | 16, 12, 10, 7, 16, 32 |
+| 2 | SPRING TANK | loose, springy | 96 | 16, 9, 9, 5, 12, 32 |
+| 3 | FOUNDRY | LXR metal | 112 | 16, 11, 13, 13, 13, 16 |
+| 4 | GRAVITY WELL | black hole, heavy | 70 | 16, 16, 16, 11, 11, 32 |
+| 5 | CLOCKWORK | tight ticks, 3 against 4 | 120 | 16, 8, 12, 4, 16, 16 |
+| 6 | RAIN ON TIN | balls on metal | 84 | 10, 13, 7, 5, 11, 22 |
+| 7 | FRACTURE | broken DnB | 170 | 26, 16, 22, 15, 17, 26 |
+| 8 | AVALANCHE | everything pushes everything | 140 | 16, 14, 12, 9, 11, 24 |
 
 ## MIDI in: COLLAPSE follows
 

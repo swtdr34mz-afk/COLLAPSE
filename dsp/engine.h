@@ -34,33 +34,43 @@ typedef struct {
 } inst_t;
 extern const inst_t INST[NINST];
 extern const macro_t MASS_KNOB, CHAOS_KNOB;
-extern const macro_t MASTER_KNOB[4];     /* the FX page: BPM, SWING, DRIVE, SPACE */
+extern const macro_t MASTER_KNOB[4];     /* the FX page: DRIVE, SPACE, PITCH, GLITCH */
 extern const char *const WEB_NAME[4];    /* CHAOS's topologies: CHAIN, RING, STAR, MESH */
 int eng_topology(int chaos);             /* 0..3 */
 
+/* the ENGINE page (EDIT): each instrument's own effects after its body */
+enum { FX_FM, FX_GRAIN, FX_FILTER, FX_CHAOS };
+extern const macro_t ENGINE_KNOB[4];     /* FM, GRAIN, FILTER, CHAOS */
+extern const macro_t GENERAL_KNOB[4];    /* the GENERAL page (GLO): BPM, SWING, DRIFT, LENGTH */
+
 typedef struct {                         /* an instrument's track in a pattern */
     uint8_t p[4];                        /* its sound: the four knobs, 0..127 */
+    uint8_t fx[4];                       /* its ENGINE page: FM, GRAIN, FILTER (64: open), CHAOS */
     uint8_t level;                       /* 0..127 */
-    uint8_t rsv[3];
+    uint8_t len;                         /* its own length, 1..64 steps (tracks of different lengths: polymeter) */
+    uint8_t rsv[2];
     uint32_t steps[2], acc[2];           /* bit s of the 64: the step plays / is accented */
 } track_t;
 
-typedef struct {                         /* a pattern: six tracks and the web */
+typedef struct {                         /* a pattern: six tracks, the web, the master */
     track_t tr[NINST];
     uint8_t mass, chaos;                 /* the macros, 0..127 */
-    uint8_t bpm;                         /* 60 .. 200 (the internal clock) */
-    uint8_t swing;                       /* 0 .. 80 */
-    uint8_t length;                      /* 16, 32, 48, 64 */
-    uint8_t drive, space;                /* the master: drive, reverb, 0..127 */
-    uint8_t rsv;
+    uint8_t bpm;                         /* 60 .. 187 (the internal clock) */
+    uint8_t swing;                       /* 0 .. 127 */
+    uint8_t drift;                       /* how far the web pushes the hits off the grid, 0 .. 127 */
+    uint8_t drive, space;                /* the master FX: drive, reverb */
+    uint8_t pitch;                       /* time in the bodies runs faster or slower: 64 = as tuned, 0 = -12, 127 = +12 */
+    uint8_t glitch;                      /* the master's stutter, 0 .. 127 */
+    uint8_t rsv[3];
 } pattern_t;
 
 typedef struct {                         /* a factory pattern, as written in patterns.c */
     const char *name, *genre;
-    uint8_t bpm, swing, mass, chaos, length, drive, space;
+    uint8_t bpm, swing, mass, chaos, drift, drive, space, pitch, glitch;
     uint8_t p[NINST][4];
+    uint8_t fx[NINST][4];
     uint8_t level[NINST];
-    const char *steps[NINST];            /* 'X' accent, 'x' hit, '.' rest; as long as the pattern */
+    const char *steps[NINST];            /* 'X' accent, 'x' hit, '.' rest; its length is the track's */
 } factory_t;
 extern const factory_t FACTORY[NPATTERNS];
 
@@ -83,7 +93,8 @@ void eng_hit(int inst, float vel);       /* an instrument now (a key) */
 void eng_kick_web(void);                 /* every instrument shoved at once (the intro's collapse) */
 void eng_panic(void);
 /* for the screen */
-int eng_step(void);                      /* the step under way (-1 stopped) */
+int eng_step(void);                      /* steps played since start (-1 stopped) */
+int eng_track_step(int inst);            /* where the instrument's own track is (-1 stopped) */
 int eng_playing(void);
 float eng_env(int inst);                 /* its level now 0..1 */
 void eng_disp(int inst, float out[4]);   /* where the web has pushed its knobs now, in knob units */
