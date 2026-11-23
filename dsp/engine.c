@@ -34,7 +34,10 @@ typedef struct {                         /* an instrument: its body, the block's
     } body;
     float peak;
     uint32_t noise;
+    uint16_t quiet;                      /* blocks it has been silent: past SLEEP_BLOCKS it sleeps (not computed) */
 } inst_state_t;
+#define SLEEP_BLOCKS 30u                 /* 87 ms: longer than any effect's memory (GRAIN keeps 46 ms) */
+#define QUIET 3e-5f                      /* -90 dB */
 static inst_state_t S[NINST];
 static volatile uint8_t muted;
 
@@ -116,6 +119,8 @@ void eng_hit(int inst, float vel)
     plat_unlock(f);
 }
 void eng_kick_web(void) { slam_req = 1; }
+static volatile uint32_t shed;           /* blocks left of the emergency brake (overload) */
+void eng_overload(void) { shed = 344u; }
 int eng_step(void) { return step_now; }
 int eng_playing(void) { return step_now >= 0 || ext_run; }
 float eng_env(int inst) { return inst >= 0 && inst < NINST ? env_out[inst] : 0.0f; }
@@ -181,6 +186,7 @@ int eng_track_step(int inst)
 static float pend_wait[NINST][NPEND], pend_vel[NINST][NPEND];
 static float bc_wait[NINST], bc_gap[NINST], bc_vel[NINST], bc_e[NINST];
 
+static uint8_t waiting;                  /* bit t: something drifting or bouncing on instrument t (else: not looked at) */
 static void later(int t, float wait, float vel)
 {
     int k;
@@ -188,6 +194,7 @@ static void later(int t, float wait, float vel)
         if (pend_wait[t][k] <= 0.0f) {
             pend_wait[t][k] = wait;
             pend_vel[t][k] = vel;
+            waiting |= (uint8_t)(1u << t);
             return;
         }
 }
@@ -215,6 +222,7 @@ static void play_step(int32_t s, uint32_t at)
             bc_e[t] = 0.5f + 0.42f * c - 0.1f * mass;
             bc_vel[t] = vel * (0.6f + 0.3f * c);
             bc_wait[t] = delay + bc_gap[t];
+            waiting |= (uint8_t)(1u << t);
         }
     }
 }
@@ -301,17 +309,34 @@ static void sequence(uint32_t n)
         ext_quiet += n;
     }
     for (i = 0; i < n; i++) {
-        for (t = 0; t < NINST; t++) {
-            for (k = 0; k < NPEND; k++)  /* the hits drifted late */
-                if (pend_wait[t][k] > 0.0f && (pend_wait[t][k] -= 1.0f) <= 0.0f)
-                    push_ev((int)t, i, pend_vel[t][k]);
-            if (bc_wait[t] > 0.0f && (bc_wait[t] -= 1.0f) <= 0.0f) {   /* a bounce */
-                push_ev((int)t, i, bc_vel[t]);
-                bc_gap[t] *= bc_e[t];
-                bc_vel[t] *= 0.55f + 0.4f * bc_e[t];
-                bc_wait[t] = bc_vel[t] < 0.08f || bc_gap[t] < 250.0f ? 0.0f : bc_gap[t];
+        if (waiting)
+            for (t = 0; t < NINST; t++) {
+                int left = 0;
+                if (!(waiting >> t & 1u))
+                    continue;
+                for (k = 0; k < NPEND; k++)   /* the hits drifted late */
+                    if (pend_wait[t][k] > 0.0f) {
+                        if ((pend_wait[t][k] -= 1.0f) <= 0.0f)
+                            push_ev((int)t, i, pend_vel[t][k]);
+                        else
+                            left = 1;
+                    }
+                if (bc_wait[t] > 0.0f) {      /* a bounce */
+                    if ((bc_wait[t] -= 1.0f) <= 0.0f) {
+                        if (shed && bc_vel[t] < 0.4f)   /* braking: the soft bounces are let go */
+                            bc_vel[t] = 0.0f;
+                        else
+                            push_ev((int)t, i, bc_vel[t]);
+                        bc_gap[t] *= bc_e[t];
+                        bc_vel[t] *= 0.55f + 0.4f * bc_e[t];
+                        bc_wait[t] = bc_vel[t] < 0.08f || bc_gap[t] < 250.0f ? 0.0f : bc_gap[t];
+                    }
+                    if (bc_wait[t] > 0.0f)
+                        left = 1;
+                }
+                if (!left)
+                    waiting &= (uint8_t)~(1u << t);
             }
-        }
         if (!running)
             continue;
         step_left -= 1.0f;
@@ -437,7 +462,7 @@ static void ifx_block(int t)             /* the knobs to coefficients, once a bl
         x->ns = 0x51ED270Bu + 0x9E3779B9u * (uint32_t)t;
     x->fm_depth = fm < 0.02f ? 0.0f : 2.0f + 60.0f * fm * fm;                    /* samples */
     x->fm_inc = (6.0f * fm_exp2f(fm * 9.0f)) / ENG_SR;                       /* 6 Hz .. 3 kHz */
-    x->g_mix = gr < 0.02f ? 0.0f : 0.3f + 0.7f * gr;
+    x->g_mix = gr < 0.02f || shed ? 0.0f : 0.3f + 0.7f * gr;
     x->g_inc = (8.0f + 50.0f * gr) / ENG_SR;                                 /* grains a second, each */
     if (fl < 60.0f) {
         x->flt_mode = 1;
@@ -488,8 +513,8 @@ static inline float ifx_run(int t, float y)
             while (pos < 0.0f)
                 pos += (float)GR_N;
             r0 = (uint32_t)pos & (GR_N - 1u);
-            w = fm_sin_turns(x->g_ph[k] * 0.5f);   /* the window: half a sine */
-            g += (float)x->gr_buf[r0] * (1.0f / 32768.0f) * w * w;
+            w = 1.0f - fm_fabsf(2.0f * x->g_ph[k] - 1.0f);   /* the window: a smoothed triangle */
+            g += (float)x->gr_buf[r0] * (1.0f / 32768.0f) * w * w * (3.0f - 2.0f * w);
         }
         x->gr_w = (x->gr_w + 1u) & (GR_N - 1u);
         y += x->g_mix * (g * 1.2f - 0.5f * y);
@@ -518,10 +543,10 @@ static void body_hit(int t, const float *p, float vel, uint32_t *ns)
  * scaled by how easily it moves (SENS). A body rendered earlier on the same core pushes with this block's sound; the
  * others (the other core, or later) with the last block's (2.9 ms later: a tie of a few milliseconds' delay). */
 static const float SENS[NINST] = {0.25f, 0.3f, 1.5f, 1.2f, 0.6f, 0.4f};
-static const uint8_t CORE_OF[NINST] = {0, 0, 0, 1, 1, 1};
-static const uint8_t ORDER[NINST] = {0, 1, 2, 4, 3, 5};   /* KICK first (both cores use it), then SNARE, HATS | PERC,
-                                                           * GLITCH, BASS */
-static float prevbuf[NINST][BLK_MAX];
+static const uint8_t CORE_OF[NINST] = {0, 0, 1, 0, 1, 1};
+static const uint8_t ORDER[NINST] = {0, 1, 4, 2, 3, 5};   /* KICK first (both cores use it), then SNARE, GLITCH |
+                                                           * PERC, HATS, BASS (about even, with the master on the first) */
+static float prevbuf[NINST][BLK_MAX], prevpeak[NINST];
 /* the pushes go one way only, from the kick outward: a body never pushes one that pushes it back (no loop: the web
  * can shake as hard as CHAOS likes, it can never run away) */
 static const uint8_t RANK[NINST] = {0, 1, 3, 4, 2, 5};   /* KICK, SNARE, PERC, HATS, GLITCH, BASS */
@@ -533,13 +558,25 @@ static void render_inst(int t)
     const float *src[NINST];
     uint32_t i, e = 0, n = blk_n, ns = 0, a;
     float own = 0.25f + 1.5f * (float)PAT->tr[t].fx[FX_CHAOS] / 127.0f;   /* its CHAOS: how easily it is pushed */
-    ifx_block(t);
+    float pmax = 0.0f;
+    int fx_on;
     for (a = 0; a < NINST; a++)          /* who pushes it */
         if (RANK[a] < RANK[t] && wtie[a][t] > 0.0f) {
             int now = a == I_KICK || (CORE_OF[a] == CORE_OF[t] && ORDER[a] < ORDER[t]);
             src[ns] = now ? ibuf[a] : prevbuf[a];
-            gain[ns++] = couple * SENS[t] * wtie[a][t] * own;
+            gain[ns] = couple * SENS[t] * wtie[a][t] * own;
+            pmax += gain[ns] * (now ? S[a].peak : prevpeak[a]);
+            ns++;
         }
+    /* asleep (silent a while, nothing struck, nothing pushing it): not computed at all */
+    if (s->quiet >= SLEEP_BLOCKS && !nev[t] && pmax < 1e-6f) {
+        for (i = 0; i < n; i++)
+            out[i] = 0.0f;
+        s->peak = 0.0f;
+        return;
+    }
+    ifx_block(t);
+    fx_on = IFX[t].fm_depth > 0.0f || IFX[t].g_mix > 0.0f || IFX[t].flt_mode;
     for (i = 0; i < n; i++) {
         float y, m, push = 0.0f;
         uint32_t j;
@@ -557,21 +594,28 @@ static void render_inst(int t)
         case I_PERC: y = perc_body_sample(&s->body.p, push); break;
         default: y = bass_body_sample(&s->body.b, push); break;
         }
-        y = ifx_run(t, y);
+        if (fx_on)
+            y = ifx_run(t, y);
         m = fm_fabsf(y);
         if (m > pk)
             pk = m;
         out[i] = y;
     }
     s->peak = pk;
+    if (pk < QUIET && !nev[t]) {
+        if (s->quiet < SLEEP_BLOCKS)
+            s->quiet++;
+    } else {
+        s->quiet = 0;
+    }
 }
 
-/* the second core's share: PERC, GLITCH, BASS (the first renders KICK, SNARE, HATS and the master) */
+/* the second core's share: PERC, HATS, BASS (the first renders KICK, SNARE, GLITCH and the master) */
 static void job_insts(uint32_t arg)
 {
     (void)arg;
     render_inst(I_PERC);
-    render_inst(I_GLITCH);
+    render_inst(I_HATS);
     render_inst(I_BASS);
 }
 
@@ -606,8 +650,11 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
             bc_wait[t] = 0.0f;
             for (k = 0; k < NPEND; k++)
                 pend_wait[t][k] = 0.0f;
+            waiting = 0;
         }
     g_step = step_base();
+    if (shed)
+        shed--;
     master_block();
     {                                    /* PITCH: time in the bodies, faster or slower */
         static const bp_t P_PITCH[] = {{0, -12.0f}, {32, -5.0f}, {64, 0.0f}, {96, 7.0f}, {127, 12.0f}};
@@ -629,12 +676,13 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
     render_inst(I_KICK);                 /* (first: both cores' bodies hear it) */
     on2 = plat_cpu2_on() && plat_cpu2_run(job_insts, 0);
     render_inst(I_SNARE);
-    render_inst(I_HATS);
+    render_inst(I_GLITCH);
     if (!on2 || plat_cpu2_wait() != 0)
         job_insts(0);
     for (t = 0; t < NINST; t++) {
         for (i = 0; i < n; i++)          /* the next block's pushes from this one */
             prevbuf[t][i] = ibuf[t][i];
+        prevpeak[t] = S[t].peak;
         env_out[t] = S[t].peak > env_out[t] ? S[t].peak : env_out[t] * 0.85f;
         energy_out[t] = web_energy((int)t);
         for (k = 0; k < 4; k++)

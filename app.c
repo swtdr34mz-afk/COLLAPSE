@@ -1056,6 +1056,8 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
     eng_render(lr, n, (float)master_q12 * (1.0f / 4096.0f) * 8300000.0f);
 }
 
+void app_overload(void) { eng_overload(); }
+
 void app_panic(void)
 {
     eng_play(0);

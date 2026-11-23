@@ -111,8 +111,11 @@ static inline void head_run(head_t *b, float push, const float *f_ring)
 
 static inline float head_mic(const head_t *b) { return b->v0 + b->mic_ring * b->v[b->m_mass]; }
 
-static int body_bad(float out, float x)  /* a body that ran away (never: but then it is stopped) */
+static int body_bad(float out, float x)  /* a body that ran away (never: but then it is stopped); looked at every 64th */
 {
+    static uint32_t n;
+    if (++n & 63u)
+        return 0;
     return !(out == out) || fm_fabsf(x) > 1e5f;
 }
 static void zero(void *p, uint32_t n)
@@ -225,7 +228,7 @@ static const float PLATE_HZ[NP] = {2810.0f, 3360.0f, 4070.0f, 4740.0f, 5390.0f, 
 typedef struct {
     float x[NP], v[NP];
     float k[NP];                         /* each to its ground (w^2) */
-    float kc, nl;                        /* the ties along the plate, their hardening */
+    float kc, nl, lim;                   /* the ties along the plate; how far they pull before they give way */
     float d;                             /* damping a sample */
     float m_amp, m_len, m_left;          /* the stick */
     float hp, hp_a;                      /* the microphone's high-pass */
@@ -246,6 +249,7 @@ static void hats_body_hit(hats_body_t *b, const float *p, float vel, uint32_t *n
     }
     b->kc = 0.01f + 0.08f * metal;
     b->nl = 2.0f + 60.0f * metal * metal;
+    b->lim = 1.0f / fm_sqrtf(b->nl);
     b->d = fm_expf(-1.0f / ((0.012f + 0.6f * decay * decay * decay) * g_tscale));
     b->m_len = b->m_left = 3.0f;
     b->m_amp = 2.0f * 1.6f * vel / 3.0f;
@@ -268,8 +272,8 @@ static inline float hats_body_sample(hats_body_t *b, float push)
         int j;
         for (j = 1; j <= 3; j += 2) {
             int o = (i + j) % NP;
-            float d = b->x[i] - b->x[o], t = b->kc * d / (1.0f + b->nl * d * d);   /* (it gives way when
-                                          * stretched: a bounded force, so the plate can never gain energy) */
+            float d = b->x[i] - b->x[o], t = b->kc * fm_clampf(d, -b->lim, b->lim);   /* (it gives way past
+                                          * lim: a bounded force, so the plate can never gain energy; no division) */
             f[i] -= t;
             f[o] += t;
         }
@@ -373,6 +377,8 @@ typedef struct {
     float x[NS], v[NS];
     float k, nl, d, dh;                  /* tension (w^2 between neighbours), its rise with the pull, damping, the
                                           * highs' damping */
+    float kt;                            /* the tension now */
+    uint32_t n;
     float m_amp, m_len, m_left;
     int m_at;
     float lfo_ph, lfo_steps, lfo_depth, mic;   /* the pickup: where, how far the wobble moves it */
@@ -385,6 +391,8 @@ static void bass_body_hit(bass_body_t *b, const float *p, float vel, uint32_t *n
     float f = 41.2034f * fm_exp2f(semi / 12.0f), w1 = FM_TWO_PI * f * g_wscale, sk = w1 * (float)(NS + 1) / FM_PI;
     (void)ns;
     b->k = sk * sk;
+    if (b->kt <= 0.0f)
+        b->kt = b->k;
     b->nl = 0.3f + 2.5f * dirt;
     b->d = fm_expf(-1.0f / ((0.15f + 3.5f * decay * decay) * g_tscale));
     b->dh = 0.0002f + 0.004f * (1.0f - dirt);   /* clean: the highs die fast (round); dirty: they ring (growl) */
@@ -401,14 +409,18 @@ static void bass_body_hit(bass_body_t *b, const float *p, float vel, uint32_t *n
 
 static inline float bass_body_sample(bass_body_t *b, float push)
 {
-    float f[NS], e = 0.0f, k, prev = 0.0f, pos, out;
+    float f[NS], k, prev = 0.0f, pos, out;
     int i, j;
-    for (i = 0; i < NS - 1; i++) {       /* the pull: how far the string is stretched (~1 at a hard pluck) */
-        float d = b->x[i + 1] - b->x[i];
-        e += d * d;
+    if (!(b->n++ & 7u)) {                /* the pull: how far the string is stretched (~1 at a hard pluck), every 8th */
+        float e = b->x[0] * b->x[0] + b->x[NS - 1] * b->x[NS - 1];
+        for (i = 0; i < NS - 1; i++) {
+            float d = b->x[i + 1] - b->x[i];
+            e += d * d;
+        }
+        e *= b->k * (1.0f / NS) * 4.0f;
+        b->kt = b->k * (1.0f + fm_minf(b->nl * e, 3.0f));
     }
-    e = (e + b->x[0] * b->x[0] + b->x[NS - 1] * b->x[NS - 1]) * b->k * (1.0f / NS) * 4.0f;
-    k = b->k * (1.0f + fm_minf(b->nl * e, 3.0f));
+    k = b->kt;
     for (i = 0; i < NS; i++) {           /* each mass between its neighbours (the ends fixed) */
         float next = i + 1 < NS ? b->x[i + 1] : 0.0f;
         f[i] = k * (prev + next - 2.0f * b->x[i]);

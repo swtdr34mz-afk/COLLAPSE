@@ -92,6 +92,7 @@ int eng_ext(void);                       /* following a MIDI clock now */
 void eng_hit(int inst, float vel);       /* an instrument now (a key) */
 void eng_kick_web(void);                 /* every instrument shoved at once (the intro's collapse) */
 void eng_panic(void);
+void eng_overload(void);                 /* the render ran late: for a second, the soft bounces and the grains go */
 /* for the screen */
 int eng_step(void);                      /* steps played since start (-1 stopped) */
 int eng_track_step(int inst);            /* where the instrument's own track is (-1 stopped) */
