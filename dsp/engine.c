@@ -25,7 +25,9 @@ static pattern_t pat0;                   /* (until the app binds its own) */
 
 typedef struct {
     voice_t v[2];                        /* two voices: a new hit takes the other one, the old one fades */
-    kick_body_t kb;                      /* the KICK: a body, not voices */
+    kick_body_t kb;                      /* KICK, SNARE, HATS: bodies, not voices */
+    snare_body_t sb;
+    hats_body_t hb;
     uint8_t next;
     float peak;                          /* the block's peak (the screen's) */
     uint32_t noise;
@@ -127,12 +129,9 @@ void eng_panic(void)
     uint32_t t;
     for (t = 0; t < NINST; t++)
         S[t].v[0].on = S[t].v[1].on = 0;
-    {
-        uint8_t *z = (uint8_t *)&S[I_KICK].kb;
-        uint32_t n;
-        for (n = 0; n < sizeof S[I_KICK].kb; n++)
-            z[n] = 0;
-    }
+    zero(&S[I_KICK].kb, sizeof S[I_KICK].kb);
+    zero(&S[I_SNARE].sb, sizeof S[I_SNARE].sb);
+    zero(&S[I_HATS].hb, sizeof S[I_HATS].hb);
 }
 
 /* a hit queued at sample `at` of the block: its knobs now (as set, pushed by the web, moved by MASS), then its push */
@@ -326,25 +325,41 @@ void eng_init(void)
     pat0.length = 16;
     PAT = &pat0;
     web_topology(eng_topology(64));
+    {                                    /* the bodies tuned before their first hit: another may shake them first */
+        float p[4] = {64.0f, 64.0f, 64.0f, 30.0f};
+        uint32_t ns = 1;
+        kick_body_hit(&S[I_KICK].kb, p, 0.0f, &ns);
+        snare_body_hit(&S[I_SNARE].sb, p, 0.0f, &ns);
+        hats_body_hit(&S[I_HATS].hb, p, 0.0f, &ns);
+    }
 }
 
 #define BLK_MAX 256u
 static float ibuf[NINST][BLK_MAX];
 static uint32_t blk_n;
+static float couple;                     /* how hard the bodies shake each other (CHAOS) */
 
 static void render_inst(int t)
 {
     inst_state_t *s = &S[t];
     float *out = ibuf[t], pk = 0.0f;
     uint32_t i, e = 0, n = blk_n;
-    if (t == I_KICK) {                   /* a body: every hit pushes it, it rings */
+    if (t <= I_HATS) {                   /* a body: every hit pushes it, it rings; the one before it shakes it */
+        const float *from = t == I_SNARE ? ibuf[I_KICK] : ibuf[I_SNARE];
+        float c = t == I_KICK ? 0.0f : couple * (t == I_SNARE ? 0.3f : 1.5f);
         for (i = 0; i < n; i++) {
-            float y, a;
+            float y, a, push = c * from[i];
             while (e < nev[t] && ev[t][e].at <= i) {
-                kick_body_hit(&s->kb, ev[t][e].p, ev[t][e].vel, &s->noise);
+                if (t == I_KICK)
+                    kick_body_hit(&s->kb, ev[t][e].p, ev[t][e].vel, &s->noise);
+                else if (t == I_SNARE)
+                    snare_body_hit(&s->sb, ev[t][e].p, ev[t][e].vel, &s->noise);
+                else
+                    hats_body_hit(&s->hb, ev[t][e].p, ev[t][e].vel, &s->noise);
                 e++;
             }
-            y = kick_body_sample(&s->kb);
+            y = t == I_KICK ? kick_body_sample(&s->kb, push)
+                : t == I_SNARE ? snare_body_sample(&s->sb, push) : hats_body_sample(&s->hb, push);
             a = fm_fabsf(y);
             if (a > pk)
                 pk = a;
@@ -417,6 +432,7 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
         web_slam();
     }
     web_step((float)n / ENG_SR, PAT->mass, PAT->chaos);
+    couple = 0.0005f + 0.005f * (float)PAT->chaos / 127.0f;
     /* the instruments: half on the second core, half here; if it cannot, all here */
     on2 = plat_cpu2_on() && plat_cpu2_run(job_insts, 0);
     render_inst(I_KICK);
