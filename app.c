@@ -727,66 +727,171 @@ void app_tick(void)
 }
 
 /* ------------------------------------------------------------------ drawing --- */
-/* The skin: brushed steel with bevels, teal LCDs, a title bar with grooves (a 90s media player); chrome type for the
- * splash (a 90s electronics ad). */
-#define SK_STEEL RGB(90, 104, 112)
-#define SK_LIGHT RGB(170, 190, 198)
-#define SK_DARK RGB(30, 40, 46)
-#define SK_TITLE RGB(36, 52, 60)
-#define LCD_BG RGB(6, 18, 20)
+/* The look: 90s cyberpunk, not clean. Gunmetal with grain and scratches under everything; displays with scanlines;
+ * a liquid plasma behind the web that flows faster and brighter the harder the web moves; grooves where light runs
+ * like liquid; the big digits split into magenta and cyan; cut corners and neon edges; and on a hard hit a few rows of
+ * the screen tear sideways for a frame. A 90s media player's layout underneath it all. */
+#define BG RGB(12, 10, 22)
+#define PANEL RGB(20, 18, 34)
+#define EDGE RGB(60, 56, 92)
+#define NEON RGB(40, 240, 255)
+#define MAGENTA RGB(255, 50, 190)
+#define ACID RGB(190, 255, 40)
+#define PURPLE RGB(120, 70, 255)
+#define LCD_BG RGB(5, 7, 15)
+#define LCD_SCAN RGB(11, 14, 28)
 #define LCD_HI RGB(93, 232, 224)
-#define LCD_MID RGB(47, 181, 173)
-#define LCD_LO RGB(22, 78, 76)
-#define LCD_GRID RGB(12, 38, 40)
+#define LCD_MID RGB(47, 170, 175)
+#define LCD_LO RGB(30, 70, 90)
+#define LCD_GRID RGB(18, 26, 44)
+#define TXT RGB(150, 146, 190)
+
+static uint32_t frame_n;                 /* frames drawn (the animations' clock) */
+static uint8_t tear;                     /* the tear to do in this frame's bands (0: none) */
 
 static void ctext(int32_t cx, int32_t y, const felucca_font_t *f, const char *s, uint16_t c)
 {
     cv_text(cx - text_w(f, s) / 2, y, f, s, c);
 }
 
-static void bevel(int32_t x, int32_t y, int32_t w, int32_t h, int raised)
+static uint16_t mix565(uint16_t a, uint16_t b, int32_t t)   /* a .. b, t 0..256 */
 {
-    uint16_t a = raised ? SK_LIGHT : SK_DARK, b = raised ? SK_DARK : SK_LIGHT;
-    cv_rect(x, y, w, 1, a);
-    cv_rect(x, y, 1, h, a);
-    cv_rect(x, y + h - 1, w, 1, b);
-    cv_rect(x + w - 1, y, 1, h, b);
+    int32_t ar = a >> 11, ag = (a >> 5) & 63, ab = a & 31, br = b >> 11, bg = (b >> 5) & 63, bb = b & 31;
+    return (uint16_t)(((ar + (br - ar) * t / 256) << 11) | ((ag + (bg - ag) * t / 256) << 5) | (ab + (bb - ab) * t / 256));
 }
 
-static void lcd_box(int32_t x, int32_t y, int32_t w, int32_t h)   /* a sunken LCD */
+static uint16_t dim_of(uint16_t c) { return mix565(BG, c, 96); }
+
+/* the grain: a 64 x 32 tile of gunmetal, worked out once (noise, a few scratches), laid under a rectangle */
+static uint16_t grain[32][64];
+static void grain_init(void)
 {
-    bevel(x, y, w, h, 0);
-    cv_rect(x + 1, y + 1, w - 2, h - 2, LCD_BG);
+    uint32_t h = 0x9E3779B9u;
+    int32_t x, y, k;
+    for (y = 0; y < 32; y++)
+        for (x = 0; x < 64; x++) {
+            int32_t n;
+            h ^= h << 13;
+            h ^= h >> 17;
+            h ^= h << 5;
+            n = (int32_t)(h & 15u);
+            grain[y][x] = mix565(RGB(26, 24, 40), RGB(48, 46, 70), n * 8 + ((x + y) & 7) * 4);
+        }
+    for (k = 0; k < 5; k++) {            /* scratches: thin diagonals */
+        int32_t sx = (int32_t)((h >> (k * 5)) & 63u), sy = k * 6;
+        for (x = 0; x < 14; x++)
+            grain[(sy + x / 3) & 31][(sx + x) & 63] = RGB(80, 78, 110);
+    }
+}
+static void grunge(int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    int32_t i, j;
+    for (j = 0; j < h; j++)
+        for (i = 0; i < w; i++)
+            cv_pset(x + i, y + j, grain[(y + j) & 31][(x + i) & 63]);
 }
 
-static uint16_t dim_of(uint16_t c)       /* a colour at about a third */
+/* a panel with cut corners and a neon edge */
+static void panel(int32_t x, int32_t y, int32_t w, int32_t h, uint16_t fill, uint16_t edge)
 {
-    uint32_t r = (c >> 11) & 31u, g = (c >> 5) & 63u, b = c & 31u;
-    return (uint16_t)(((r * 3u / 8u) << 11) | ((g * 3u / 8u) << 5) | (b * 3u / 8u));
+    int32_t c = 4, k;
+    cv_rect(x + c, y, w - 2 * c, h, fill);
+    cv_rect(x, y + c, w, h - 2 * c, fill);
+    for (k = 0; k < c; k++) {
+        cv_rect(x + c - k, y + k, w - 2 * (c - k), 1, fill);
+        cv_rect(x + c - k, y + h - 1 - k, w - 2 * (c - k), 1, fill);
+    }
+    cv_rect(x + c, y, w - 2 * c, 1, edge);
+    cv_rect(x + c, y + h - 1, w - 2 * c, 1, edge);
+    cv_rect(x, y + c, 1, h - 2 * c, edge);
+    cv_rect(x + w - 1, y + c, 1, h - 2 * c, edge);
+    cv_line(x, y + c, x + c, y, edge);
+    cv_line(x + w - 1 - c, y, x + w - 1, y + c, edge);
+    cv_line(x, y + h - 1 - c, x + c, y + h - 1, edge);
+    cv_line(x + w - 1 - c, y + h - 1, x + w - 1, y + h - 1 - c, edge);
 }
 
-/* the title bar: grooves either side of the name (or a message), the three little buttons */
+/* a display: dark, with scanlines */
+static void lcd_box(int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    int32_t j;
+    panel(x, y, w, h, LCD_BG, EDGE);
+    for (j = y + 2; j < y + h - 2; j += 2)
+        cv_rect(x + 2, j, w - 4, 1, LCD_SCAN);
+}
+
+/* text split into magenta and cyan (a 90s video glitch), wider when the beat hits */
+static void chroma(int32_t x, int32_t y, const felucca_font_t *f, const char *s, int32_t d, uint16_t c)
+{
+    cv_text(x - d, y, f, s, MAGENTA);
+    cv_text(x + d, y, f, s, NEON);
+    cv_text(x, y, f, s, c);
+}
+
+/* the tear: a few rows of the band just drawn, moved sideways (a hard hit) */
+static void tear_band(void)
+{
+    uint32_t h = 0x2545F491u ^ (frame_n * 2654435761u), r, k;
+    if (!tear)
+        return;
+    for (k = 0; k < tear; k++) {
+        uint32_t y0, rows, row;
+        int32_t sh;
+        h ^= h << 13;
+        h ^= h >> 17;
+        h ^= h << 5;
+        y0 = h % cv_h;
+        rows = 1u + (h >> 8) % 5u;
+        sh = (int32_t)((h >> 16) % 13u) - 6;
+        for (row = y0; row < y0 + rows && row < cv_h; row++) {
+            uint16_t *p = cv_px + row * cv_w;
+            if (sh > 0)
+                for (r = cv_w - 1; r >= (uint32_t)sh; r--)
+                    p[r] = p[r - (uint32_t)sh];
+            else if (sh < 0)
+                for (r = 0; r + (uint32_t)(-sh) < cv_w; r++)
+                    p[r] = p[r + (uint32_t)(-sh)];
+        }
+    }
+}
+
+/* the title bar: the name split in colour, a ticker running through, the three little buttons (or a message) */
 static void draw_title(uint32_t now)
 {
     int32_t x, i;
-    cv_rect(0, 0, 240, 15, SK_TITLE);
-    bevel(0, 0, 240, 15, 1);
-    for (i = 0; i < 3; i++) {
-        cv_rect(212 + i * 9, 4, 7, 7, SK_STEEL);
-        bevel(212 + i * 9, 4, 7, 7, 1);
-    }
+    char t[64];
+    cv_rect(0, 0, 240, 15, RGB(16, 12, 30));
+    cv_rect(0, 14, 240, 1, MAGENTA);
+    for (i = 0; i < 3; i++)
+        cv_rect(214 + i * 8, 4, 6, 6, i == 2 ? MAGENTA : EDGE);
     if (now < ui.msg_until) {
         x = cv_text(6, 1, &FONT_XS, ui.msg[0], C_WHITE);
-        cv_text(x + 6, 1, &FONT_XS, ui.msg[1], LCD_HI);
+        cv_text(x + 6, 1, &FONT_XS, ui.msg[1], NEON);
         return;
     }
-    x = cv_text(6, 1, &FONT_XS, "COLLAPSE", LCD_HI);
-    for (i = x + 6; i < 206; i += 3)     /* the grooves */
-        cv_rect(i, 4, 1, 7, (i & 1) ? SK_LIGHT : SK_DARK);
+    chroma(6, 1, &FONT_XS, "COLLAPSE", (frame_n & 15u) == 0 ? 2 : 1, C_WHITE);
+    t[0] = 0;                            /* the ticker */
+    text_cat(t, "/// ");
+    text_cat(t, FACTORY[set.cur].name);
+    text_cat(t, " /// ");
+    text_cat(t, WEB_NAME[eng_topology(PT.chaos)]);
+    text_cat(t, " /// ");
+    text_cat(t, MASS_KNOB.zone[zone_near(&MASS_KNOB, PT.mass)]);
+    text_cat(t, " ");
+    {
+        int32_t w = text_w(&FONT_XS, t), off = (int32_t)(frame_n % (uint32_t)w), x0 = 70 - off;
+        cv_text(x0, 1, &FONT_XS, t, LCD_LO);
+        cv_text(x0 + w, 1, &FONT_XS, t, LCD_LO);
+        cv_rect(0, 0, 68, 14, RGB(16, 12, 30));   /* (the ticker runs behind the name) */
+        cv_rect(206, 0, 34, 14, RGB(16, 12, 30));
+        chroma(6, 1, &FONT_XS, "COLLAPSE", (frame_n & 15u) == 0 ? 2 : 1, C_WHITE);
+        for (i = 0; i < 3; i++)
+            cv_rect(214 + i * 8, 4, 6, 6, i == 2 ? MAGENTA : EDGE);
+    }
 }
 
-/* the left LCD: where the beat is (bar.beat, big), the tempo, the clock it follows, the transport; or a sweetspot
- * just reached, big; and six little level bars */
+/* the left display: where the beat is, big, split in colour; the tempo and the clock it follows; or a sweetspot just
+ * reached; six little level bars */
 static void draw_time(int32_t y, uint32_t now)
 {
     int32_t s = eng_step(), i;
@@ -794,18 +899,21 @@ static void draw_time(int32_t y, uint32_t now)
     lcd_box(4, y, 118, 56);
     if (now < ui.big_until && ui.big) {
         cv_text(10, y + 5, &FONT_XS, ui.big_of, LCD_MID);
-        cv_text(10, y + 20, text_w(&FONT_B, ui.big) > 104 ? &FONT_XS : &FONT_B, ui.big, ui.big_col);
+        chroma(10, y + 20, text_w(&FONT_B, ui.big) > 104 ? &FONT_XS : &FONT_B, ui.big, 1, ui.big_col);
     } else {
-        int32_t bar = s >= 0 ? s / 16 + 1 : 1, beat = s >= 0 ? (s % 16) / 4 + 1 : 1;
+        int32_t bar = s >= 0 ? s / 16 % 100 + 1 : 1, beat = s >= 0 ? (s % 16) / 4 + 1 : 1;
         two_digits(bar, t);
         t[2] = '.';
         t[3] = (char)('0' + beat);
         t[4] = 0;
-        cv_text(10, y + 4, &APP_BIG_FONT, t, s >= 0 ? LCD_HI : LCD_LO);
+        if (s >= 0)
+            chroma(10, y + 4, &APP_BIG_FONT, t, eng_env(I_KICK) > 0.4f ? 3 : 1, C_WHITE);
+        else
+            cv_text(10, y + 4, &APP_BIG_FONT, t, LCD_LO);
     }
-    if (s >= 0) {                        /* play: a triangle; stopped: a square */
+    if (s >= 0) {
         for (i = 0; i < 5; i++)
-            cv_rect(104 + i, y + 6 + i, 1, 10 - 2 * i, LCD_HI);
+            cv_rect(104 + i, y + 6 + i, 1, 10 - 2 * i, NEON);
     } else {
         cv_rect(104, y + 7, 8, 8, LCD_LO);
     }
@@ -816,133 +924,154 @@ static void draw_time(int32_t y, uint32_t now)
         int_text(PT.bpm, t);
         text_cat(t, " BPM");
     }
-    cv_text(10, y + 40, &FONT_XS, t, eng_ext() ? C_WHITE : LCD_MID);
-    for (i = 0; i < NINST; i++) {        /* the levels, as a little analyser */
-        int32_t h = (int32_t)(fm_clampf(eng_env((int)i) * 1.6f, 0.0f, 1.0f) * 14.0f);
-        cv_rect(76 + i * 7, y + 52 - 14, 5, 14, LCD_GRID);
-        if (h > 0)
-            cv_rect(76 + i * 7, y + 52 - h, 5, h, (ui.muted >> i & 1u) ? LCD_LO : LCD_MID);
+    cv_text(10, y + 40, &FONT_XS, t, eng_ext() ? ACID : LCD_MID);
+    for (i = 0; i < NINST; i++) {        /* the levels: magenta at the top */
+        int32_t h = (int32_t)(fm_clampf(eng_env((int)i) * 1.6f, 0.0f, 1.0f) * 14.0f), j;
+        cv_rect(76 + i * 7, y + 38, 5, 14, LCD_GRID);
+        if (!(ui.muted >> i & 1u))
+            for (j = 0; j < h; j++)
+                cv_rect(76 + i * 7, y + 51 - j, 5, 1, mix565(NEON, MAGENTA, j * 18));
     }
 }
 
-/* the web: six masses on a hexagon, moved by how far they are pushed, their ties drawn; the picked one ringed */
+/* the web on a liquid plasma: the plasma flows faster and brighter the harder the web moves; the masses glow */
 static const int8_t HEX_X[NINST] = {0, 30, 30, 0, -30, -30}, HEX_Y[NINST] = {-20, -10, 10, 20, 10, -10};
+static float plasma_t;
 static void draw_web(int32_t y)
 {
     int32_t cx = 180, cy = y + 26, nx[NINST], ny[NINST], i, j, topo = eng_topology(PT.chaos);
+    float e = 0.0f;
+    for (i = 0; i < NINST; i++)
+        e += eng_energy((int)i);
+    e = fm_clampf(e * 0.4f, 0.0f, 1.0f);
+    plasma_t += 0.04f + 0.25f * e;
     lcd_box(124, y, 112, 56);
+    for (j = 0; j < 13; j++)             /* the plasma: 4 x 4 cells, three waves */
+        for (i = 0; i < 27; i++) {
+            float v = fm_sinf((float)i * 0.32f + plasma_t) + fm_sinf((float)j * 0.45f - plasma_t * 1.3f)
+                      + fm_sinf((float)(i + j) * 0.21f + plasma_t * 0.7f);
+            int32_t k = (int32_t)((v + 3.0f) * 42.0f);
+            uint16_t c = mix565(LCD_BG, k < 128 ? PURPLE : NEON, (k < 128 ? k : 255 - k) * (int32_t)(40.0f + 110.0f * e) / 128);
+            cv_rect(126 + i * 4, y + 2 + j * 4, 4, 4, c);
+        }
+    for (j = y + 2; j < y + 54; j += 2)  /* the scanlines over it */
+        cv_rect(126, j, 108, 1, LCD_BG);
     for (i = 0; i < NINST; i++) {
         float d[4];
         eng_disp((int)i, d);
-        nx[i] = cx + HEX_X[i] + (int32_t)(d[0] * 0.22f + d[2] * 0.12f);
-        ny[i] = cy + HEX_Y[i] + (int32_t)(d[1] * 0.18f + d[3] * 0.1f);
-        nx[i] = clamp(nx[i], 128, 231);
-        ny[i] = clamp(ny[i], y + 4, y + 51);
+        nx[i] = clamp(cx + HEX_X[i] + (int32_t)(d[0] * 0.22f + d[2] * 0.12f), 130, 229);
+        ny[i] = clamp(cy + HEX_Y[i] + (int32_t)(d[1] * 0.18f + d[3] * 0.1f), y + 5, y + 50);
     }
-    for (i = 0; i < NINST; i++)          /* the ties of the topology now */
+    for (i = 0; i < NINST; i++)
         for (j = i + 1; j < NINST; j++) {
             int tie = topo == 3 || (topo == 2 && i == 0) || ((topo <= 1) && j == i + 1)
                       || (topo == 1 && i == 0 && j == NINST - 1);
             if (tie)
                 cv_line(nx[i], ny[i], nx[j], ny[j], topo == 3 ? LCD_LO : LCD_MID);
         }
-    for (i = 0; i < NINST; i++) {
-        int32_t r = 1 + (int32_t)(eng_env((int)i) * 4.0f);
+    for (i = 0; i < NINST; i++) {        /* the masses: a glow, a core */
+        int32_t r = clamp(1 + (int32_t)(eng_env((int)i) * 4.0f), 1, 4);
         uint16_t c = (ui.muted >> i & 1u) ? LCD_LO : INST[i].rgb;
-        r = clamp(r, 1, 4);
+        cv_rect(nx[i] - r - 1, ny[i] - r + 1, 2 * r + 3, 2 * r - 1, dim_of(c));
+        cv_rect(nx[i] - r + 1, ny[i] - r - 1, 2 * r - 1, 2 * r + 3, dim_of(c));
         cv_rect(nx[i] - r, ny[i] - r, 2 * r + 1, 2 * r + 1, c);
-        if (i == set.sel) {
-            int32_t q = r + 3;
-            cv_rect(nx[i] - q, ny[i] - q, 2 * q + 1, 1, C_WHITE);
-            cv_rect(nx[i] - q, ny[i] + q, 2 * q + 1, 1, C_WHITE);
-            cv_rect(nx[i] - q, ny[i] - q, 1, 2 * q + 1, C_WHITE);
-            cv_rect(nx[i] + q, ny[i] - q, 1, 2 * q + 1, C_WHITE);
+        if ((uint32_t)i == set.sel) {    /* the picked one: magenta brackets */
+            int32_t q = r + 4;
+            cv_rect(nx[i] - q, ny[i] - q, 3, 1, MAGENTA);
+            cv_rect(nx[i] - q, ny[i] - q, 1, 3, MAGENTA);
+            cv_rect(nx[i] + q - 2, ny[i] + q, 3, 1, MAGENTA);
+            cv_rect(nx[i] + q, ny[i] + q - 2, 1, 3, MAGENTA);
         }
     }
-    cv_text(128, y + 42, &FONT_XS, WEB_NAME[topo], LCD_MID);
+    cv_text(130, y + 41, &FONT_XS, WEB_NAME[topo], ACID);
 }
 
-/* the six "equaliser" sliders: each instrument's groove, its thumb where the web has it (how hard it moves), its
- * level lit under; the picked one's name lit, a muted one's struck out */
+/* the six sliders: liquid light running up each groove (faster the harder it moves), a neon thumb where the web has
+ * it, the level lit under it */
 static void draw_sliders(int32_t y)
 {
     int32_t i;
-    cv_rect(0, y, 240, 50, SK_STEEL);
-    bevel(2, y, 236, 50, 1);
+    grunge(0, y, 240, 50);
+    cv_rect(0, y, 240, 1, EDGE);
     for (i = 0; i < NINST; i++) {
-        int32_t x = 9 + i * 38, gx = x + 13, top = y + 4, h = 30;
-        int32_t th = top + h - 6 - (int32_t)(eng_energy((int)i) * (float)(h - 6));
+        int32_t x = 9 + i * 38, gx = x + 13, top = y + 4, h = 30, j;
+        float en = eng_energy((int)i);
+        int32_t th = top + h - 6 - (int32_t)(en * (float)(h - 6));
         int32_t lv = (int32_t)(fm_clampf(eng_env((int)i) * 1.5f, 0.0f, 1.0f) * (float)(h - 2));
         int sel = (uint32_t)i == set.sel, mute = ui.muted >> i & 1u;
-        cv_rect(gx, top, 6, h, SK_DARK);
-        bevel(gx, top, 6, h, 0);
-        if (lv > 0 && !mute)
-            cv_rect(gx + 2, top + h - 1 - lv, 2, lv, INST[i].rgb);
-        cv_rect(x + 5, th, 22, 6, sel ? INST[i].rgb : SK_LIGHT);   /* the thumb */
-        bevel(x + 5, th, 22, 6, 1);
-        cv_rect(x + 6, th + 2, 20, 1, sel ? C_WHITE : SK_DARK);
-        ctext(x + 16, y + 36, &FONT_XS, INST[i].tag, mute ? SK_DARK : sel ? C_WHITE : SK_DARK);
+        uint16_t c = INST[i].rgb;
+        cv_rect(gx - 1, top - 1, 8, h + 2, BG);
+        for (j = 0; j < h; j++) {        /* the liquid: light running up */
+            float w = 0.5f + 0.5f * fm_sinf((float)j * 0.45f + (float)frame_n * (0.25f + en) + (float)i);
+            int32_t k = mute ? 10 : (int32_t)(w * (j >= h - lv ? 220.0f : 70.0f));
+            cv_rect(gx, top + j, 6, 1, mix565(BG, c, k));
+        }
+        panel(x + 4, th - 1, 24, 8, sel ? c : RGB(70, 66, 100), sel ? C_WHITE : EDGE);
+        cv_rect(x + 8, th + 2, 16, 1, sel ? C_WHITE : BG);
+        ctext(x + 16, y + 36, &FONT_XS, INST[i].tag, mute ? EDGE : sel ? C_WHITE : TXT);
         if (mute)
-            cv_rect(x + 5, y + 42, 22, 1, RGB(255, 80, 80));
+            cv_line(x + 6, y + 47, x + 26, y + 37, MAGENTA);
     }
 }
 
-/* the four knobs: balance sliders with their sweetspots as ticks, the zone they are on or near */
+/* the four knobs: neon bars on dark cut-corner panels, the sweetspots as ticks, the zone they are on or near */
 static void draw_knobs(int32_t y, uint32_t now)
 {
     int32_t k;
-    uint16_t col = ui.page <= PG_ENGINE ? IN.rgb : LCD_HI;
-    cv_rect(0, y, 240, 44, SK_STEEL);
-    bevel(2, y, 236, 44, 1);
+    uint16_t col = ui.page <= PG_ENGINE ? IN.rgb : NEON;
+    grunge(0, y, 240, 44);
     for (k = 0; k < 4; k++) {
         const macro_t *mc = page_knob(k);
-        int32_t x = 7 + k * 58, w = 52, v = knob_val(k), z = zone_at(mc, v), zn = zone_near(mc, v);
-        int32_t fx = x + 1 + (v * (w - 8)) / 127;
+        int32_t x = 4 + k * 59, w = 55, v = knob_val(k), z = zone_at(mc, v), zn = zone_near(mc, v);
+        int32_t fill = (v * (w - 8)) / 127, j;
         int hot = ui.knob_at[k] && now - ui.knob_at[k] < 600u;
         uint32_t i;
         char t[8];
-        cv_text(x, y + 2, &FONT_XS, mc->name, hot ? C_WHITE : SK_DARK);
-        cv_rect(x, y + 17, w, 5, SK_DARK);
-        bevel(x, y + 17, w, 5, 0);
+        panel(x, y + 2, w, 40, PANEL, hot ? col : EDGE);
+        cv_text(x + 5, y + 3, &FONT_XS, mc->name, hot ? C_WHITE : TXT);
+        cv_rect(x + 4, y + 18, w - 8, 5, BG);
+        for (j = 0; j < fill; j++)       /* the bar: a gradient, a ripple running through it */
+            cv_rect(x + 4 + j, y + 18, 1, 5,
+                    mix565(z >= 0 ? col : mix565(col, BG, 120), MAGENTA,
+                           (j * 160) / (w - 8) + (int32_t)(30.0f * fm_sinf((float)j * 0.5f - (float)frame_n * 0.3f))));
         for (i = 0; i < mc->nzones; i++)
-            cv_rect(x + 3 + (mc->centre[i] * (w - 8)) / 127, y + 14, 1, 2, (int)i == z ? C_WHITE : SK_DARK);
-        cv_rect(fx, y + 15, 7, 9, z >= 0 ? col : SK_LIGHT);
-        bevel(fx, y + 15, 7, 9, 1);
+            cv_rect(x + 4 + (mc->centre[i] * (w - 8)) / 127, y + 15, 1, 2, (int)i == z ? C_WHITE : EDGE);
+        cv_rect(x + 3 + fill, y + 16, 2, 9, C_WHITE);
         if (knob_shows_number(k)) {
             int_text(k == 0 ? v + 60 : v + 1, t);
-            ctext(x + w / 2, y + 27, &FONT_XS, t, z >= 0 || hot ? C_WHITE : SK_DARK);
+            ctext(x + w / 2, y + 26, &FONT_XS, t, z >= 0 || hot ? C_WHITE : TXT);
         } else if (hot && z < 0) {
             int_text(v, t);
-            ctext(x + w / 2, y + 27, &FONT_XS, t, C_WHITE);
+            ctext(x + w / 2, y + 26, &FONT_XS, t, C_WHITE);
         } else {
-            ctext(x + w / 2, y + 27, &FONT_XS, mc->zone[z >= 0 ? z : zn], z >= 0 ? C_WHITE : SK_DARK);
+            ctext(x + w / 2, y + 26, &FONT_XS, mc->zone[z >= 0 ? z : zn], z >= 0 ? C_WHITE : TXT);
         }
     }
 }
 
-/* MASS and CHAOS: two segment meters, as a media player's volume and balance */
+/* MASS and CHAOS: two segment meters, acid to magenta */
 static void draw_macros(int32_t y)
 {
     int32_t m, i;
-    cv_rect(0, y, 240, 18, SK_STEEL);
+    grunge(0, y, 240, 18);
     for (m = 0; m < 2; m++) {
         const macro_t *mc = m ? &CHAOS_KNOB : &MASS_KNOB;
         int32_t x = 4 + m * 118, v = m ? PT.chaos : PT.mass, segs = (v * 16 + 63) / 127;
-        uint16_t c = m ? RGB(255, 110, 200) : RGB(255, 190, 90);
         lcd_box(x, y + 1, 114, 16);
-        cv_text(x + 4, y + 2, &FONT_XS, mc->name, LCD_MID);
+        cv_text(x + 5, y + 2, &FONT_XS, mc->name, m ? MAGENTA : ACID);
         for (i = 0; i < 16; i++)
-            cv_rect(x + 46 + i * 4, y + 5, 3, 8, i < segs ? c : LCD_GRID);
+            cv_rect(x + 46 + i * 4, y + 5, 3, 8, i < segs ? mix565(m ? NEON : ACID, MAGENTA, i * 16) : LCD_GRID);
     }
 }
 
-/* the playlist: the pattern (and the one queued), then the picked instrument's steps on the page shown */
+/* the playlist: the pattern (and the one queued), then the picked track's steps on the page shown (PERF: the pads) */
 static void draw_playlist(int32_t y, int32_t s)
 {
     int32_t i, j;
     char t[40];
     lcd_box(2, y, 236, 57);
-    cv_rect(4, y + 2, 232, 14, RGB(18, 58, 61));
+    cv_rect(4, y + 2, 232, 14, RGB(40, 10, 50));
+    cv_rect(4, y + 15, 232, 1, MAGENTA);
     two_digits(set.cur + 1, t);
     text_cat(t, ". ");
     text_cat(t, FACTORY[set.cur].name);
@@ -950,33 +1079,32 @@ static void draw_playlist(int32_t y, int32_t s)
     text_cat(t, FACTORY[set.cur].genre);
     cv_text(8, y + 3, &FONT_XS, t, C_WHITE);
     int_text(PT.bpm, t);
-    cv_text(232 - text_w(&FONT_XS, t), y + 3, &FONT_XS, t, C_WHITE);
+    cv_text(232 - text_w(&FONT_XS, t), y + 3, &FONT_XS, t, ACID);
     if (ui.browse >= 0 || eng_next_pending()) {   /* the next one */
         int32_t b = ui.browse >= 0 ? ui.browse : set.cur;
         two_digits(b + 1, t);
         text_cat(t, ". ");
         text_cat(t, FACTORY[b].name);
         cv_text(8, y + 17, &FONT_XS, t, LCD_MID);
-        cv_text(232 - text_w(&FONT_XS, "NEXT"), y + 17, &FONT_XS, "NEXT", LCD_HI);
+        cv_text(232 - text_w(&FONT_XS, "NEXT"), y + 17, &FONT_XS, "NEXT", (frame_n & 8u) ? MAGENTA : NEON);
     } else {
         int32_t x;
         if (ui.perf) {                   /* the live FX keys, lit while held */
-            int32_t fx = 8;
-            cv_text(fx, y + 17, &FONT_XS, "PERFORM", LCD_HI);
-            fx = 70;
+            int32_t fx = 70;
+            cv_text(8, y + 17, &FONT_XS, "PERFORM", MAGENTA);
             for (i = P_GATE; i < NPADS; i++) {
                 int on = ui.pads >> i & 1u;
                 int32_t w = text_w(&FONT_XS, PAD_SHORT[i]) + 4;
-                cv_rect(fx, y + 17, w, 12, on ? LCD_HI : LCD_GRID);
+                cv_rect(fx, y + 17, w, 12, on ? NEON : LCD_GRID);
                 cv_text(fx + 2, y + 17, &FONT_XS, PAD_SHORT[i], on ? LCD_BG : LCD_MID);
                 fx += w + 3;
             }
             goto steps;
         }
         x = cv_text(8, y + 17, &FONT_XS, ui.page <= PG_ENGINE ? IN.name : PAGE_NAME[ui.page],
-                            ui.page <= PG_ENGINE ? IN.rgb : LCD_HI);
+                    ui.page <= PG_ENGINE ? IN.rgb : NEON);
         if (ui.page == PG_ENGINE)
-            x = cv_text(x + 6, y + 17, &FONT_XS, "ENGINE", LCD_HI);
+            x = cv_text(x + 6, y + 17, &FONT_XS, "ENGINE", MAGENTA);
         t[0] = 0;
         int_text(ui.view * 16 + 1, t);
         text_cat(t, "-");
@@ -988,15 +1116,15 @@ static void draw_playlist(int32_t y, int32_t s)
         text_cat(t, "CPU ");
         int_text((int32_t)plat_cpu_pct(), t + 4);
         text_cat(t, "%");
-        cv_text(232 - text_w(&FONT_XS, t), y + 17, &FONT_XS, t, plat_cpu_pct() > 80u ? C_WHITE : LCD_LO);
+        cv_text(232 - text_w(&FONT_XS, t), y + 17, &FONT_XS, t, plat_cpu_pct() > 80u ? MAGENTA : LCD_LO);
     }
 steps:
     if (ui.perf) {                       /* PERF: the sixteen pads, held ones lit */
         for (i = 0; i < 16; i++) {
             int32_t x = 6 + (i % 8) * 29, yy = y + 30 + (i / 8) * 13;
             int on = ui.pads >> i & 1u;
-            cv_rect(x, yy, 27, 12, on ? LCD_HI : LCD_GRID);
-            ctext(x + 14, yy, &FONT_XS, PAD_SHORT[i], on ? LCD_BG : LCD_MID);
+            cv_rect(x, yy, 27, 12, on ? (i == P_COLLAPSE ? MAGENTA : NEON) : LCD_GRID);
+            ctext(x + 14, yy, &FONT_XS, PAD_SHORT[i], on ? LCD_BG : i == P_COLLAPSE ? MAGENTA : LCD_MID);
         }
         return;
     }
@@ -1005,6 +1133,7 @@ steps:
         int on, acc;
         if (st >= len_steps()) {
             cv_rect(x, yy, 12, 13, LCD_GRID);
+            cv_line(x, yy + 12, x + 11, yy, LCD_SCAN);
             continue;
         }
         on = step_on(&TR, st);
@@ -1013,71 +1142,89 @@ steps:
         if (acc)
             cv_rect(x + 2, yy + 2, 8, 2, C_WHITE);
         for (j = 0; j < NINST; j++)
-            if ((uint32_t)j != set.sel && step_on(&PT.tr[j], st) && mx < x + 11) {
+            if ((uint32_t)j != set.sel && step_on(&PT.tr[j], st % PT.tr[j].len) && mx < x + 11) {
                 cv_rect(mx, yy + 15, 2, 2, (ui.muted >> j & 1u) ? LCD_LO : INST[j].rgb);
                 mx += 2;
             }
-        if (st == s)
-            cv_rect(x, yy + 19, 12, 3, C_WHITE);
-        else if (i % 4 == 0)
+        if (st == s) {
+            cv_rect(x - 1, yy - 1, 14, 1, MAGENTA);
+            cv_rect(x, yy + 19, 12, 3, MAGENTA);
+        } else if (i % 4 == 0) {
             cv_rect(x, yy + 19, 2, 2, LCD_LO);
+        }
     }
 }
 
 static void draw(uint32_t now)
 {
     int32_t s = eng_track_step(set.sel);
-    cv_begin(240, 120, SK_STEEL);
+    frame_n++;
+    tear = eng_env(I_KICK) > 0.55f ? 2 : 0;   /* a hard kick: the screen tears */
+    if (ui.pads >> P_COLLAPSE & 1u)
+        tear = 6;
+    cv_begin(240, 120, BG);
     draw_title(now);
+    grunge(0, 15, 240, 2);
+    grunge(0, 15, 4, 56);
+    grunge(122, 15, 2, 56);
+    grunge(236, 15, 4, 56);
+    grunge(0, 68, 240, 2);
     draw_time(17, now);
     draw_web(17);
     draw_sliders(70);
+    tear_band();
     cv_blit(0, 0);
-    cv_begin(240, 120, SK_STEEL);
+    cv_begin(240, 120, BG);
     draw_knobs(0, now);
     draw_macros(44);
+    grunge(0, 62, 240, 1);
     draw_playlist(63, s);
+    tear_band();
     cv_blit(0, 120);
     ui.drawn_at = now;
 }
 
 /* ---------------------------------------------------------- splash, intro --- */
-/* chrome type: the word drawn dark, then mid, then light, a pixel apart each (a 90s electronics ad) */
+/* chrome type, split in colour (a 90s electronics ad on a VHS tape) */
 static void chrome(int32_t cx, int32_t y, const felucca_font_t *f, const char *s)
 {
     int32_t x = cx - text_w(f, s) / 2;
-    cv_text(x + 2, y + 2, f, s, RGB(20, 40, 48));
-    cv_text(x + 1, y + 1, f, s, RGB(80, 120, 130));
-    cv_text(x, y, f, s, RGB(225, 245, 250));
+    cv_text(x - 2, y, f, s, MAGENTA);
+    cv_text(x + 2, y + 1, f, s, NEON);
+    cv_text(x + 1, y + 2, f, s, RGB(40, 30, 70));
+    cv_text(x, y, f, s, RGB(235, 240, 255));
 }
 
-static void draw_logo(int lit)          /* the name on a horizon grid; lit: how many of the six masses have fallen */
+static void draw_logo(int lit)          /* the name over a neon horizon; lit: how many of the six masses have fallen */
 {
     int32_t i;
-    cv_begin(240, 120, C_BLACK);
-    for (i = 0; i < 6; i++)              /* the chrome bands behind the name */
-        cv_rect(0, 40 + i * 6, 240, 2, i & 1 ? RGB(14, 40, 44) : RGB(22, 60, 64));
+    cv_begin(240, 120, BG);
+    for (i = 0; i < 120; i += 2)
+        cv_rect(0, i, 240, 1, RGB(16, 12, 30));
+    for (i = 0; i < 6; i++)              /* the bands behind the name */
+        cv_rect(0, 40 + i * 6, 240, 2, mix565(RGB(40, 10, 60), RGB(10, 60, 80), i * 50));
     chrome(120, 44, &APP_BIG_FONT, "COLLAPSE");
-    cv_rect(30, 86, 180, 1, LCD_HI);
-    ctext(120, 92, &FONT_XS, "PHYSICS DRUM MACHINE", LCD_MID);
+    cv_rect(30, 86, 180, 1, MAGENTA);
+    ctext(120, 92, &FONT_XS, "PHYSICS DRUM MACHINE", NEON);
     cv_blit(0, 0);
-    cv_begin(240, 120, C_BLACK);
+    cv_begin(240, 120, BG);
     for (i = 0; i < 7; i++)              /* the horizon grid */
-        cv_rect(0, 50 + i * i * 2, 240, 1, LCD_LO);
+        cv_rect(0, 50 + i * i * 2, 240, 1, mix565(PURPLE, MAGENTA, i * 40));
     for (i = -6; i <= 6; i++)
-        cv_line(120 + i * 8, 50, 120 + i * 40, 119, LCD_GRID);
+        cv_line(120 + i * 8, 50, 120 + i * 40, 119, RGB(60, 20, 90));
     for (i = 0; i < NINST; i++) {
         int on = i < lit;
         int32_t x = 120 + (on ? HEX_X[i] / 3 : HEX_X[i] * 2), yy = on ? 30 + HEX_Y[i] / 3 : 30 + HEX_Y[i];
-        cv_rect(x - 3, yy - 3, 7, 7, on ? INST[i].rgb : RGB(40, 60, 64));
+        cv_rect(x - 3, yy - 3, 7, 7, on ? INST[i].rgb : RGB(40, 40, 70));
     }
-    ctext(120, 100, &FONT_XS, "by swtdr34mz", RGB(150, 160, 168));
+    ctext(120, 100, &FONT_XS, "by swtdr34mz", RGB(170, 160, 210));
     cv_blit(0, 120);
 }
 
 void app_splash(void)
 {
-    lcd_fill(0, 0, 240, 240, C_BLACK);
+    lcd_fill(0, 0, 240, 240, BG);
+    grain_init();
     draw_logo(0);
 }
 
@@ -1136,6 +1283,7 @@ void app_panic(void)
 
 void app_ui_init(void)
 {
+    grain_init();
     ui.browse = -1;
     ui.step_drawn = -2;
     ui.redraw = 1;
