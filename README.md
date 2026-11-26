@@ -7,13 +7,16 @@ Six synthesized instruments hang in a **web of springs**. Every hit is a push: t
 parameters, and its neighbours in the web get shoved too. The springs pull everything back to the sound you set, so
 no two hits sound the same and the groove never falls apart. Glitch, dubstep, DnB, LXR.
 
-![COLLAPSE](site/img/screen-main.png) ![The splash](site/img/screen-splash.png)
+![COLLAPSE](site/img/screen-main.png) ![PERFORM](site/img/screen-perform.png) ![The splash](site/img/screen-splash.png)
 
 ## The web
 
 Each instrument is a mass on four springs, one per knob. The display shows the six masses live (top right): a hit
-makes its mass jump, the ties carry the push on, the ringed one is the instrument picked. The sliders below are the
-instruments' "equaliser": the thumb shows how hard each one moves, the colour under it its level.
+makes its mass jump, the ties carry the push on, the ringed one is the instrument picked. The six keys below are the
+instruments: the picked one tinted, each with a bar that shows its level, its edge lighting up as it is hit.
+
+The status bar at the top is on every page: the name (or the last message), the page, play (EXT with a MIDI clock),
+and the battery: four cells, a bolt while it charges over USB, the last cell blinking when it runs low.
 
 Two macros rule the web, on the two encoders left of the screen:
 
@@ -134,7 +137,7 @@ with SAVE.
 ## Building
 
     git clone --recursive https://github.com/swtdr34mz-afk/COLLAPSE
-    X0X_FONTSET=terminus python3 fm1-base/tools/build.py . --host
+    python3 fm1-base/tools/build.py . --host
     build/host/collapse_host tests/basic.txt build/host
 
 GitHub Actions builds the installable `.fwsc` on every push (Actions tab > the run > Artifacts). A tag `v0.1.0` makes a

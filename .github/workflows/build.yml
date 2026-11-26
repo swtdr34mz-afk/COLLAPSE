@@ -15,9 +15,6 @@ permissions:
   contents: write
   pages: write
 
-env:
-  X0X_FONTSET: terminus          # the screens' pixel type (fm1-base's Terminus set)
-
 jobs:
   build:
     runs-on: ubuntu-22.04

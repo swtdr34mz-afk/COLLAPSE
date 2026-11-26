@@ -893,74 +893,150 @@ void app_tick(void)
 }
 
 /* ------------------------------------------------------------------ drawing --- */
-/* The look: 90s cyberpunk, not clean. Gunmetal with sk_grain and scratches under everything; displays with scanlines;
- * a liquid plasma behind the web that flows faster and brighter the harder the web moves; grooves where light runs
- * like liquid; the big digits split into magenta and cyan; cut corners and neon edges; and on a hard hit a few rows of
- * the screen tear sideways for a frame. A 90s media player's layout underneath it all. */
-#define SK_BG RGB(12, 10, 22)
-#define SK_PANEL RGB(20, 18, 34)
-#define SK_EDGE RGB(60, 56, 92)
+/* The look: 90s cyberpunk, finer grained. Smooth type (Barlow) and soft edges: the rings, dots and rounded keys have
+ * their edge pixels blended by how much of them the shape covers, the web's ties are anti-aliased lines (Wu). A deep
+ * liquid backdrop with faint scanlines, dark cut-corner panels, neon that glows. A status bar on every page: the name,
+ * the page, play, the battery. A hard hit still tears the screen for a frame. The screen is drawn in two bands of 120
+ * rows, each drawn with the whole screen's coordinates (what falls outside the band is clipped). */
+#define SK_BG RGB(10, 9, 20)
+#define SK_PANEL RGB(14, 13, 27)
+#define SK_DEEP RGB(5, 7, 15)
+#define SK_EDGE RGB(52, 48, 84)
 #define SK_NEON RGB(40, 240, 255)
 #define SK_MAGENTA RGB(255, 50, 190)
 #define SK_ACID RGB(190, 255, 40)
 #define SK_PURPLE RGB(120, 70, 255)
-#define SK_LCD_BG RGB(5, 7, 15)
-#define SK_LCD_SCAN RGB(11, 14, 28)
-#define SK_LCD_HI RGB(93, 232, 224)
-#define SK_LCD_MID RGB(47, 170, 175)
-#define SK_LCD_LO RGB(30, 70, 90)
-#define SK_LCD_GRID RGB(18, 26, 44)
-#define SK_TXT RGB(150, 146, 190)
+#define SK_ORANGE RGB(255, 160, 60)
+#define SK_TXT RGB(168, 164, 205)
+#define SK_DIM RGB(96, 92, 134)
+#define SK_TRACK RGB(36, 34, 60)
+#define SK_GRID RGB(17, 25, 44)
+#define SK_OFF RGB(28, 26, 48)
+#define SK_BAR RGB(6, 5, 13)
 
-static uint32_t sk_frame;                 /* frames drawn (the animations' clock) */
-static uint8_t sk_tearing;                     /* the tear to do in this frame's bands (0: none) */
+static uint32_t sk_frame;                /* frames drawn (the animations' clock) */
+static uint8_t sk_tearing;               /* the tear to do in this frame's bands (0: none) */
 
 static void ctext(int32_t cx, int32_t y, const felucca_font_t *f, const char *s, uint16_t c)
 {
     cv_text(cx - text_w(f, s) / 2, y, f, s, c);
 }
 
+/* the smaller face when the text is wider than w */
+static const felucca_font_t *sk_fit(const felucca_font_t *f, const char *s, int32_t w)
+{
+    return text_w(f, s) <= w ? f : &FONT_T;
+}
+
 static uint16_t sk_mix(uint16_t a, uint16_t b, int32_t t)   /* a .. b, t 0..256 */
 {
     int32_t ar = a >> 11, ag = (a >> 5) & 63, ab = a & 31, br = b >> 11, bg = (b >> 5) & 63, bb = b & 31;
+    if (t <= 0)
+        return a;
+    if (t >= 256)
+        return b;
     return (uint16_t)(((ar + (br - ar) * t / 256) << 11) | ((ag + (bg - ag) * t / 256) << 5) | (ab + (bb - ab) * t / 256));
 }
 
-static uint16_t sk_dim(uint16_t c) { return sk_mix(SK_BG, c, 96); }
+static int sk_in(int32_t y, int32_t h)   /* rows y .. y+h-1 touch the band being drawn */
+{
+    return y + h + cv_oy > cv_y0 && y + cv_oy < cv_y1;
+}
 
-/* the sk_grain: a 64 x 32 tile of gunmetal, worked out once (noise, a few scratches), laid under a rectangle */
-static uint16_t sk_grain[32][64];
-static void sk_grain_init(void)
+static void sk_blend(int32_t x, int32_t y, uint16_t c, int32_t a)   /* c over the pixel, a 0..256 */
+{
+    uint32_t i;
+    y += cv_oy;
+    if (a <= 0 || (uint32_t)x >= cv_w || y < cv_y0 || y >= cv_y1)
+        return;
+    i = (uint32_t)y * cv_w + (uint32_t)x;
+    cv_px[i] = swap16(a >= 256 ? c : sk_mix(swap16(cv_px[i]), c, a));
+}
+
+/* the backdrop: a 64 x 48 tile of slow liquid waves, faint scanlines and grain, worked out once (stored as the
+ * canvas holds it) */
+static uint16_t sk_tile[48][64];
+
+static float sk_atan2(float y, float x)  /* (the rings' tables, once) */
+{
+    float ax = fm_fabsf(x), ay = fm_fabsf(y), a, s, r;
+    if (ax < 1e-6f && ay < 1e-6f)
+        return 0.0f;
+    a = ax > ay ? ay / ax : ax / ay;
+    s = a * a;
+    r = ((-0.0464964749f * s + 0.15931422f) * s - 0.327622764f) * s * a + a;
+    if (ay > ax)
+        r = 1.57079637f - r;
+    if (x < 0.0f)
+        r = 3.14159274f - r;
+    return y < 0.0f ? -r : r;
+}
+
+/* the rings (a knob's arc, 270 degrees from the lower left): for each pixel of the box, its coverage and where along
+ * the arc it is (0..250; 255 the gap at the bottom). Two sizes: the pages' knobs, PERF's MUTATE */
+#define RS_HALF 14
+#define RL_HALF 24
+#define RS_N (2 * RS_HALF + 1)
+#define RL_N (2 * RL_HALF + 1)
+static uint8_t rs_cov[RS_N * RS_N], rs_pos[RS_N * RS_N], rl_cov[RL_N * RL_N], rl_pos[RL_N * RL_N];
+#define RS_R 11.0f
+#define RL_R 20.0f
+
+static void ring_init(uint8_t *cov, uint8_t *pos, int32_t half, float r, float w)
+{
+    int32_t i, j, n = 2 * half + 1;
+    for (j = 0; j < n; j++)
+        for (i = 0; i < n; i++) {
+            float dx = (float)(i - half), dy = (float)(j - half), d = fm_sqrtf(dx * dx + dy * dy);
+            float c = fm_clampf(w * 0.5f - fm_fabsf(d - r) + 0.5f, 0.0f, 1.0f);
+            float a = sk_atan2(dy, dx) * 57.2957795f - 135.0f;   /* degrees, clockwise on the screen */
+            while (a < 0.0f)
+                a += 360.0f;
+            cov[j * n + i] = (uint8_t)(c * 255.0f);
+            pos[j * n + i] = a > 270.0f ? 255u : (uint8_t)(a * (250.0f / 270.0f));
+        }
+}
+
+static void sk_init(void)
 {
     uint32_t h = 0x9E3779B9u;
-    int32_t x, y, k;
-    for (y = 0; y < 32; y++)
+    int32_t x, y;
+    for (y = 0; y < 48; y++)
         for (x = 0; x < 64; x++) {
+            float fx = (float)x * (6.2831853f / 64.0f), fy = (float)y * (6.2831853f / 48.0f);
+            float w = fm_sinf(fx + 1.6f * fm_sinf(fy)) * fm_cosf(fy - fx);
             int32_t n;
+            uint16_t c = sk_mix(RGB(12, 10, 26), RGB(34, 17, 58), (int32_t)(fm_maxf(w, 0.0f) * 110.0f));
             h ^= h << 13;
             h ^= h >> 17;
             h ^= h << 5;
-            n = (int32_t)(h & 15u);
-            sk_grain[y][x] = sk_mix(RGB(26, 24, 40), RGB(48, 46, 70), n * 8 + ((x + y) & 7) * 4);
+            n = (int32_t)(h & 7u);
+            c = sk_mix(c, RGB(40, 36, 64), n * 4);
+            if (y & 1)
+                c = sk_mix(c, C_BLACK, 50);
+            sk_tile[y][x] = swap16(c);
         }
-    for (k = 0; k < 5; k++) {            /* scratches: thin diagonals */
-        int32_t sx = (int32_t)((h >> (k * 5)) & 63u), sy = k * 6;
-        for (x = 0; x < 14; x++)
-            sk_grain[(sy + x / 3) & 31][(sx + x) & 63] = RGB(80, 78, 110);
-    }
-}
-static void sk_grunge(int32_t x, int32_t y, int32_t w, int32_t h)
-{
-    int32_t i, j;
-    for (j = 0; j < h; j++)
-        for (i = 0; i < w; i++)
-            cv_pset(x + i, y + j, sk_grain[(y + j) & 31][(x + i) & 63]);
+    ring_init(rs_cov, rs_pos, RS_HALF, RS_R, 2.8f);
+    ring_init(rl_cov, rl_pos, RL_HALF, RL_R, 4.0f);
 }
 
-/* a sk_panel with cut corners and a neon edge */
+static void sk_backdrop(void)
+{
+    uint32_t r, x;
+    for (r = 0; r < cv_h; r++) {
+        const uint16_t *t = sk_tile[(uint32_t)((int32_t)r - cv_oy) % 48u];
+        uint16_t *p = cv_px + r * cv_w;
+        for (x = 0; x < cv_w; x++)
+            p[x] = t[x & 63u];
+    }
+}
+
+/* a panel with cut corners: dark, a thin edge */
 static void sk_panel(int32_t x, int32_t y, int32_t w, int32_t h, uint16_t fill, uint16_t edge)
 {
-    int32_t c = 4, k;
+    int32_t c = 6, k;
+    if (!sk_in(y, h))
+        return;
     cv_rect(x + c, y, w - 2 * c, h, fill);
     cv_rect(x, y + c, w, h - 2 * c, fill);
     for (k = 0; k < c; k++) {
@@ -971,33 +1047,139 @@ static void sk_panel(int32_t x, int32_t y, int32_t w, int32_t h, uint16_t fill, 
     cv_rect(x + c, y + h - 1, w - 2 * c, 1, edge);
     cv_rect(x, y + c, 1, h - 2 * c, edge);
     cv_rect(x + w - 1, y + c, 1, h - 2 * c, edge);
-    cv_line(x, y + c, x + c, y, edge);
-    cv_line(x + w - 1 - c, y, x + w - 1, y + c, edge);
-    cv_line(x, y + h - 1 - c, x + c, y + h - 1, edge);
-    cv_line(x + w - 1 - c, y + h - 1, x + w - 1, y + h - 1 - c, edge);
+    for (k = 0; k <= c; k++) {           /* the cuts: 45 degrees, their outer side softened */
+        cv_pset(x + k, y + c - k, edge);
+        cv_pset(x + w - 1 - k, y + c - k, edge);
+        cv_pset(x + k, y + h - 1 - c + k, edge);
+        cv_pset(x + w - 1 - k, y + h - 1 - c + k, edge);
+        if (k < c) {
+            sk_blend(x + k, y + c - k - 1, edge, 70);
+            sk_blend(x + w - 1 - k, y + c - k - 1, edge, 70);
+            sk_blend(x + k, y + h - c + k, edge, 70);
+            sk_blend(x + w - 1 - k, y + h - c + k, edge, 70);
+        }
+    }
 }
 
-/* a display: dark, with scanlines */
-static void sk_lcd(int32_t x, int32_t y, int32_t w, int32_t h)
+/* a rounded rectangle, its corners anti-aliased; SK_HOLLOW: the edge alone */
+#define SK_HOLLOW 1
+static void sk_rrect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint16_t fill, uint16_t edge, int flags)
 {
-    int32_t j;
-    sk_panel(x, y, w, h, SK_LCD_BG, SK_EDGE);
-    for (j = y + 2; j < y + h - 2; j += 2)
-        cv_rect(x + 2, j, w - 4, 1, SK_LCD_SCAN);
+    int32_t i, j;
+    float fr = (float)r;
+    if (w <= 0 || h <= 0 || !sk_in(y, h))
+        return;
+    if (r * 2 > w)
+        r = w / 2, fr = (float)r;
+    if (r * 2 > h)
+        r = h / 2, fr = (float)r;
+    for (j = 0; j < h; j++) {
+        int cy = j < r || j >= h - r;
+        if (!sk_in(y + j, 1))
+            continue;
+        for (i = 0; i < w; i++) {
+            int cx = i < r || i >= w - r, border = i == 0 || j == 0 || i == w - 1 || j == h - 1;
+            if (cx && cy) {              /* a corner: coverage by the distance from its centre */
+                float ox = (float)(i < r ? r : w - r) - ((float)i + 0.5f);
+                float oy = (float)(j < r ? r : h - r) - ((float)j + 0.5f);
+                float d = fm_sqrtf(ox * ox + oy * oy);
+                float out = fm_clampf(fr - d + 0.5f, 0.0f, 1.0f), in = fm_clampf(fr - 1.0f - d + 0.5f, 0.0f, 1.0f);
+                if (out <= 0.0f)
+                    continue;
+                if (flags & SK_HOLLOW) {
+                    sk_blend(x + i, y + j, edge, (int32_t)((out - in) * 256.0f));
+                } else {
+                    sk_blend(x + i, y + j, sk_mix(edge, fill, (int32_t)(in * 256.0f)), (int32_t)(out * 256.0f));
+                }
+            } else if (border) {
+                cv_pset(x + i, y + j, edge);
+            } else if (!(flags & SK_HOLLOW)) {
+                cv_pset(x + i, y + j, fill);
+            }
+        }
+    }
 }
 
-/* text split into magenta and cyan (a 90s video glitch), wider when the beat hits */
-static void sk_chroma(int32_t x, int32_t y, const felucca_font_t *f, const char *s, int32_t d, uint16_t c)
+/* a dot (thick 0) or a circle line (thick its width), soft-edged, at alpha a (0..256) */
+static void sk_disc(float cx, float cy, float r, float thick, uint16_t c, int32_t a)
 {
-    cv_text(x - d, y, f, s, SK_MAGENTA);
-    cv_text(x + d, y, f, s, SK_NEON);
+    int32_t x0 = (int32_t)(cx - r - thick - 1.0f), x1 = (int32_t)(cx + r + thick + 2.0f);
+    int32_t y0 = (int32_t)(cy - r - thick - 1.0f), y1 = (int32_t)(cy + r + thick + 2.0f), x, y;
+    if (!sk_in(y0, y1 - y0))
+        return;
+    for (y = y0; y < y1; y++)
+        for (x = x0; x < x1; x++) {
+            float dx = (float)x + 0.5f - cx, dy = (float)y + 0.5f - cy, d = fm_sqrtf(dx * dx + dy * dy), cov;
+            cov = thick > 0.0f ? thick * 0.5f - fm_fabsf(d - r) + 0.5f : r - d + 0.5f;
+            if (cov > 0.0f)
+                sk_blend(x, y, c, (int32_t)(fm_minf(cov, 1.0f) * (float)a));
+        }
+}
+
+/* an anti-aliased line (Wu), at alpha a */
+static void sk_line(float x0, float y0, float x1, float y1, uint16_t c, int32_t a)
+{
+    int steep = fm_fabsf(y1 - y0) > fm_fabsf(x1 - x0);
+    float t, g;
+    int32_t x, xe;
+    if (steep) {
+        t = x0, x0 = y0, y0 = t;
+        t = x1, x1 = y1, y1 = t;
+    }
+    if (x0 > x1) {
+        t = x0, x0 = x1, x1 = t;
+        t = y0, y0 = y1, y1 = t;
+    }
+    g = x1 - x0 < 0.5f ? 0.0f : (y1 - y0) / (x1 - x0);
+    xe = (int32_t)(x1 + 0.5f);
+    for (x = (int32_t)(x0 + 0.5f); x <= xe; x++) {
+        float yy = y0 + g * ((float)x - x0), f;
+        int32_t yi = (int32_t)fm_floorf(yy);
+        f = yy - (float)yi;
+        if (steep) {
+            sk_blend(yi, x, c, (int32_t)((1.0f - f) * (float)a));
+            sk_blend(yi + 1, x, c, (int32_t)(f * (float)a));
+        } else {
+            sk_blend(x, yi, c, (int32_t)((1.0f - f) * (float)a));
+            sk_blend(x, yi + 1, c, (int32_t)(f * (float)a));
+        }
+    }
+}
+
+/* a knob's ring: the arc lit to v (0..127) in c over the track, a white bead at its end; big: PERF's size */
+static void sk_ring(int32_t cx, int32_t cy, int big, int32_t v, uint16_t c)
+{
+    const uint8_t *cov = big ? rl_cov : rs_cov, *pos = big ? rl_pos : rs_pos;
+    int32_t half = big ? RL_HALF : RS_HALF, n = 2 * half + 1, i, j, lit = v * 250 / 127;
+    float r = big ? RL_R : RS_R, ang = (135.0f + 270.0f * (float)v / 127.0f) * 0.0174532925f;
+    if (!sk_in(cy - half, n))
+        return;
+    for (j = 0; j < n; j++)
+        for (i = 0; i < n; i++) {
+            uint32_t k = (uint32_t)(j * n + i);
+            if (cov[k] && pos[k] != 255u)
+                sk_blend(cx - half + i, cy - half + j, (int32_t)pos[k] <= lit && v > 0 ? c : SK_TRACK, cov[k] + 1);
+        }
+    sk_disc((float)cx + 0.5f + fm_cosf(ang) * r, (float)cy + 0.5f + fm_sinf(ang) * r, big ? 2.8f : 2.1f, 0.0f, C_WHITE, 256);
+}
+
+/* text with a soft glow of colour g around it */
+static void sk_glow_text(int32_t x, int32_t y, const felucca_font_t *f, const char *s, uint16_t c, uint16_t g)
+{
+    uint16_t d = sk_mix(SK_DEEP, g, 120);
+    if (!sk_in(y - 1, f->h + 2))
+        return;
+    cv_text(x - 1, y, f, s, d);
+    cv_text(x + 1, y, f, s, d);
+    cv_text(x, y - 1, f, s, d);
+    cv_text(x, y + 1, f, s, d);
     cv_text(x, y, f, s, c);
 }
 
 /* the tear: a few rows of the band just drawn, moved sideways (a hard hit) */
 static void sk_tear(void)
 {
-    uint32_t h = 0x2545F491u ^ (sk_frame * 2654435761u), r, k;
+    uint32_t h = 0x2545F491u ^ (sk_frame * 2654435761u) ^ (uint32_t)cv_oy, r, k;
     if (!sk_tearing)
         return;
     for (k = 0; k < sk_tearing; k++) {
@@ -1007,8 +1189,8 @@ static void sk_tear(void)
         h ^= h >> 17;
         h ^= h << 5;
         y0 = h % cv_h;
-        rows = 1u + (h >> 8) % 5u;
-        sh = (int32_t)((h >> 16) % 13u) - 6;
+        rows = 1u + (h >> 8) % 4u;
+        sh = (int32_t)((h >> 16) % 9u) - 4;
         for (row = y0; row < y0 + rows && row < cv_h; row++) {
             uint16_t *p = cv_px + row * cv_w;
             if (sh > 0)
@@ -1021,334 +1203,359 @@ static void sk_tear(void)
     }
 }
 
-/* the title bar: the name split in colour, a ticker running through, the three little buttons (or a message) */
-static void draw_title(uint32_t now)
+/* ---- the status bar, on every page: the name (or a message), the page, play, the battery */
+static const uint8_t BOLT[9] = {0x0C, 0x18, 0x30, 0x7E, 0x0C, 0x18, 0x30, 0x20, 0x00};   /* 7 wide, a row a byte */
+
+static void draw_battery(int32_t x, int32_t y)
 {
-    int32_t x, i;
-    char t[64];
-    cv_rect(0, 0, 240, 15, RGB(16, 12, 30));
-    cv_rect(0, 14, 240, 1, SK_MAGENTA);
-    for (i = 0; i < 3; i++)
-        cv_rect(214 + i * 8, 4, 6, 6, i == 2 ? SK_MAGENTA : SK_EDGE);
-    if (now < ui.msg_until) {
-        x = cv_text(6, 1, &FONT_XS, ui.msg[0], C_WHITE);
-        cv_text(x + 6, 1, &FONT_XS, ui.msg[1], SK_NEON);
+    int b = plat_battery(), ch = plat_battery_charging(), cells, i;
+    static const uint16_t COL[4] = {SK_MAGENTA, SK_ORANGE, SK_ACID, SK_ACID};
+    uint16_t c;
+    sk_rrect(x, y, 23, 11, 3, SK_BAR, SK_TXT, 0);
+    cv_rect(x + 23, y + 3, 2, 5, SK_TXT);
+    if (b < 0)                           /* not read yet: the outline alone */
         return;
+    cells = b >= 4 ? 4 : b + 1;
+    c = b >= 4 ? SK_NEON : COL[b];
+    if (ch == 2)                         /* charging: the cells fill up, over and over */
+        cells = 1 + (int)((sk_frame / 6u) % 4u), c = SK_ACID;
+    for (i = 0; i < 4; i++) {
+        uint16_t cc = i < cells ? c : SK_OFF;
+        if (b == 0 && ch != 2 && (sk_frame & 16u))   /* empty: the last cell blinks */
+            cc = SK_OFF;
+        sk_rrect(x + 3 + i * 5, y + 3, 4, 5, 1, cc, cc, 0);
     }
-    sk_chroma(6, 1, &FONT_XS, "COLLAPSE", (sk_frame & 15u) == 0 ? 2 : 1, C_WHITE);
-    t[0] = 0;                            /* the ticker */
-    text_cat(t, "/// ");
-    text_cat(t, FACTORY[set.cur].name);
-    text_cat(t, " /// ");
-    text_cat(t, WEB_NAME[eng_topology(PT.chaos)]);
-    text_cat(t, " /// ");
-    text_cat(t, MASS_KNOB.zone[zone_near(&MASS_KNOB, PT.mass)]);
-    text_cat(t, " ");
-    {
-        int32_t w = text_w(&FONT_XS, t), off = (int32_t)(sk_frame % (uint32_t)w), x0 = 70 - off;
-        cv_text(x0, 1, &FONT_XS, t, SK_LCD_LO);
-        cv_text(x0 + w, 1, &FONT_XS, t, SK_LCD_LO);
-        cv_rect(0, 0, 68, 14, RGB(16, 12, 30));   /* (the ticker runs behind the name) */
-        cv_rect(206, 0, 34, 14, RGB(16, 12, 30));
-        sk_chroma(6, 1, &FONT_XS, "COLLAPSE", (sk_frame & 15u) == 0 ? 2 : 1, C_WHITE);
-        for (i = 0; i < 3; i++)
-            cv_rect(214 + i * 8, 4, 6, 6, i == 2 ? SK_MAGENTA : SK_EDGE);
+    if (ch == 2 || b >= 4) {             /* the bolt: 5 V in */
+        int32_t bx = x + 8, by = y + 1, r, k;
+        for (r = 0; r < 9; r++)
+            for (k = 0; k < 7; k++)
+                if (BOLT[r] >> (6 - k) & 1u) {
+                    cv_pset(bx + k - 1, by + r, SK_BAR);
+                    cv_pset(bx + k + 1, by + r, SK_BAR);
+                }
+        for (r = 0; r < 9; r++)
+            for (k = 0; k < 7; k++)
+                if (BOLT[r] >> (6 - k) & 1u)
+                    cv_pset(bx + k, by + r, C_WHITE);
     }
 }
 
-/* the left display: where the beat is, big, split in colour; the tempo and the clock it follows; or a sweetspot just
- * reached; six little level bars */
-static void draw_time(int32_t y, uint32_t now)
+static void draw_status(uint32_t now)
 {
-    int32_t s = eng_step(), i;
-    char t[16];
-    sk_lcd(4, y, 118, 56);
-    if (now < ui.big_until && ui.big) {
-        cv_text(10, y + 5, &FONT_XS, ui.big_of, SK_LCD_MID);
-        sk_chroma(10, y + 20, text_w(&FONT_B, ui.big) > 104 ? &FONT_XS : &FONT_B, ui.big, 1, ui.big_col);
+    int32_t x;
+    if (!sk_in(0, 18))
+        return;
+    cv_rect(0, 0, 240, 17, SK_BAR);
+    cv_rect(0, 17, 240, 1, sk_mix(SK_BAR, SK_NEON, 80));
+    cv_rect(0, 17, 66, 1, SK_MAGENTA);
+    if (now < ui.msg_until) {            /* a message: in the name's place */
+        const felucca_font_t *f = text_w(&FONT_XS, ui.msg[0]) + text_w(&FONT_XS, ui.msg[1]) > 158 ? &FONT_T : &FONT_XS;
+        x = cv_text(5, 3, f, ui.msg[0], C_WHITE);
+        cv_text(x + 5, 3, f, ui.msg[1], SK_NEON);
     } else {
+        sk_glow_text(5, 1, &FONT_B, "COLLAPSE", C_WHITE, SK_MAGENTA);
+        cv_text(84, 3, &FONT_XS, ui.perf ? "PERFORM" : PAGE_NAME[ui.page], SK_NEON);
+    }
+    if (eng_ext())
+        cv_text(196 - text_w(&FONT_T, "EXT") - 12, 4, &FONT_T, "EXT", SK_ACID);
+    if (eng_playing()) {                 /* play: a soft triangle */
+        for (x = 0; x < 8; x++) {
+            int32_t hh = 10 - (x * 10) / 8;
+            cv_rect(186 + x, 9 - hh / 2, 1, hh, SK_ACID);
+        }
+    } else {
+        sk_rrect(186, 5, 7, 7, 1, SK_DIM, SK_DIM, 0);
+    }
+    draw_battery(208, 3);
+}
+
+/* ---- the hero: the pattern big, its name, the tempo and where the bar is (or a sweetspot just reached) */
+static void draw_hero(uint32_t now)
+{
+    int32_t s = eng_step(), x, i;
+    int next = ui.browse >= 0 || eng_next_pending(), pat = ui.browse >= 0 ? ui.browse : set.cur;
+    const char *name = FACTORY[pat].name;
+    char t[24];
+    if (!sk_in(22, 72))
+        return;
+    sk_panel(4, 22, 116, 72, SK_DEEP, SK_EDGE);
+    cv_rect(10, 92, 50, 1, next ? SK_MAGENTA : SK_NEON);
+    if (now < ui.big_until && ui.big) {  /* a sweetspot: its name big */
+        const felucca_font_t *f = text_w(&FONT_M, ui.big) <= 104 ? &FONT_M : &FONT_B;
+        cv_text(11, 26, &FONT_T, ui.big_of, SK_DIM);
+        sk_glow_text(11, 38, sk_fit(f, ui.big, 104), ui.big, C_WHITE, ui.big_col);
+    } else {
+        int blink = next && (sk_frame & 8u);
+        two_digits(pat + 1, t);
+        sk_glow_text(10, 22, &FONT_L, t, blink ? SK_MAGENTA : RGB(235, 255, 255), next ? SK_MAGENTA : SK_NEON);
+        for (i = 0; name[i] && name[i] != ' '; i++)   /* the name over two lines, split at its first space */
+            t[i] = name[i];
+        t[i] = 0;
+        cv_text(52, 29, sk_fit(&FONT_B, t, 64), t, next ? SK_MAGENTA : SK_NEON);
+        if (name[i])
+            cv_text(52, 43, sk_fit(&FONT_B, name + i + 1, 64), name + i + 1, next ? SK_MAGENTA : SK_NEON);
+    }
+    if (eng_ext()) {                     /* the tempo, or the clock it follows */
+        x = cv_text(10, 64, &FONT_M, "EXT", SK_ACID);
+        cv_text(x + 3, 73, &FONT_T, "SYNC", SK_DIM);
+    } else {
+        int_text(PT.bpm, t);
+        x = cv_text(10, 64, &FONT_M, t, C_WHITE);
+        cv_text(x + 3, 73, &FONT_T, "BPM", SK_DIM);
+    }
+    cv_text(74, 64, &FONT_T, "SW", SK_DIM);
+    int_text(PT.swing, t);
+    cv_text(116 - text_w(&FONT_XS, t), 63, &FONT_XS, t, SK_TXT);
+    cv_text(74, 77, &FONT_T, "BAR", SK_DIM);
+    {
         int32_t bar = s >= 0 ? s / 16 % 100 + 1 : 1, beat = s >= 0 ? (s % 16) / 4 + 1 : 1;
         two_digits(bar, t);
         t[2] = '.';
         t[3] = (char)('0' + beat);
         t[4] = 0;
-        if (s >= 0)
-            sk_chroma(10, y + 4, &APP_BIG_FONT, t, eng_env(I_KICK) > 0.4f ? 3 : 1, C_WHITE);
-        else
-            cv_text(10, y + 4, &APP_BIG_FONT, t, SK_LCD_LO);
-    }
-    if (s >= 0) {
-        for (i = 0; i < 5; i++)
-            cv_rect(104 + i, y + 6 + i, 1, 10 - 2 * i, SK_NEON);
-    } else {
-        cv_rect(104, y + 7, 8, 8, SK_LCD_LO);
-    }
-    t[0] = 0;
-    if (eng_ext()) {
-        text_cat(t, "EXT SYNC");
-    } else {
-        int_text(PT.bpm, t);
-        text_cat(t, " BPM");
-    }
-    cv_text(10, y + 40, &FONT_XS, t, eng_ext() ? SK_ACID : SK_LCD_MID);
-    for (i = 0; i < NINST; i++) {        /* the levels: magenta at the top */
-        int32_t h = (int32_t)(fm_clampf(eng_env((int)i) * 1.6f, 0.0f, 1.0f) * 14.0f), j;
-        cv_rect(76 + i * 7, y + 38, 5, 14, SK_LCD_GRID);
-        if (!(ui.muted >> i & 1u))
-            for (j = 0; j < h; j++)
-                cv_rect(76 + i * 7, y + 51 - j, 5, 1, sk_mix(SK_NEON, SK_MAGENTA, j * 18));
+        cv_text(116 - text_w(&FONT_XS, t), 76, &FONT_XS, t, s >= 0 ? SK_NEON : SK_DIM);
     }
 }
 
-/* the web on a liquid plasma: the plasma flows faster and brighter the harder the web moves; the masses glow */
+/* ---- the web: a fine grid that brightens as it moves, the ties anti-aliased, the masses glowing */
 static const int8_t HEX_X[NINST] = {0, 30, 30, 0, -30, -30}, HEX_Y[NINST] = {-20, -10, 10, 20, 10, -10};
-static float sk_plasma;
-static void draw_web(int32_t y)
+static void draw_web(void)
 {
-    int32_t cx = 180, cy = y + 26, nx[NINST], ny[NINST], i, j, topo = eng_topology(PT.chaos);
-    float e = 0.0f;
+    int32_t cx = 180, cy = 56, i, j, topo = eng_topology(PT.chaos);
+    float nx[NINST], ny[NINST], e = 0.0f;
+    uint16_t grid;
+    if (!sk_in(22, 72))
+        return;
     for (i = 0; i < NINST; i++)
         e += eng_energy((int)i);
     e = fm_clampf(e * 0.4f, 0.0f, 1.0f);
-    sk_plasma += 0.04f + 0.25f * e;
-    sk_lcd(124, y, 112, 56);
-    for (j = 0; j < 13; j++)             /* the plasma: 4 x 4 cells, three waves */
-        for (i = 0; i < 27; i++) {
-            float v = fm_sinf((float)i * 0.32f + sk_plasma) + fm_sinf((float)j * 0.45f - sk_plasma * 1.3f)
-                      + fm_sinf((float)(i + j) * 0.21f + sk_plasma * 0.7f);
-            int32_t k = (int32_t)((v + 3.0f) * 42.0f);
-            uint16_t c = sk_mix(SK_LCD_BG, k < 128 ? SK_PURPLE : SK_NEON, (k < 128 ? k : 255 - k) * (int32_t)(40.0f + 110.0f * e) / 128);
-            cv_rect(126 + i * 4, y + 2 + j * 4, 4, 4, c);
-        }
-    for (j = y + 2; j < y + 54; j += 2)  /* the scanlines over it */
-        cv_rect(126, j, 108, 1, SK_LCD_BG);
+    sk_panel(124, 22, 112, 72, SK_DEEP, SK_EDGE);
+    grid = sk_mix(SK_DEEP, sk_mix(SK_GRID, SK_PURPLE, (int32_t)(e * 120.0f)), 200);
+    for (i = 132; i < 234; i += 12)
+        cv_rect(i, 24, 1, 68, grid);
+    for (j = 30; j < 92; j += 12)
+        cv_rect(126, j, 108, 1, grid);
     for (i = 0; i < NINST; i++) {
         float d[4];
         eng_disp((int)i, d);
-        nx[i] = clamp(cx + HEX_X[i] + (int32_t)(d[0] * 0.22f + d[2] * 0.12f), 130, 229);
-        ny[i] = clamp(cy + HEX_Y[i] + (int32_t)(d[1] * 0.18f + d[3] * 0.1f), y + 5, y + 50);
+        nx[i] = fm_clampf((float)(cx + HEX_X[i] * 5 / 4) + d[0] * 0.27f + d[2] * 0.15f, 132.0f, 228.0f);
+        ny[i] = fm_clampf((float)(cy + HEX_Y[i] * 5 / 4) + d[1] * 0.22f + d[3] * 0.12f, 30.0f, 80.0f);
     }
     for (i = 0; i < NINST; i++)
         for (j = i + 1; j < NINST; j++) {
             int tie = topo == 3 || (topo == 2 && i == 0) || ((topo <= 1) && j == i + 1)
                       || (topo == 1 && i == 0 && j == NINST - 1);
             if (tie)
-                cv_line(nx[i], ny[i], nx[j], ny[j], topo == 3 ? SK_LCD_LO : SK_LCD_MID);
+                sk_line(nx[i], ny[i], nx[j], ny[j], sk_mix(INST[i].rgb, INST[j].rgb, 128), topo == 3 ? 110 : 210);
         }
-    for (i = 0; i < NINST; i++) {        /* the masses: a glow, a core */
-        int32_t r = clamp(1 + (int32_t)(eng_env((int)i) * 4.0f), 1, 4);
-        uint16_t c = (ui.muted >> i & 1u) ? SK_LCD_LO : INST[i].rgb;
-        cv_rect(nx[i] - r - 1, ny[i] - r + 1, 2 * r + 3, 2 * r - 1, sk_dim(c));
-        cv_rect(nx[i] - r + 1, ny[i] - r - 1, 2 * r - 1, 2 * r + 3, sk_dim(c));
-        cv_rect(nx[i] - r, ny[i] - r, 2 * r + 1, 2 * r + 1, c);
-        if ((uint32_t)i == set.sel) {    /* the picked one: magenta brackets */
-            int32_t q = r + 4;
-            cv_rect(nx[i] - q, ny[i] - q, 3, 1, SK_MAGENTA);
-            cv_rect(nx[i] - q, ny[i] - q, 1, 3, SK_MAGENTA);
-            cv_rect(nx[i] + q - 2, ny[i] + q, 3, 1, SK_MAGENTA);
-            cv_rect(nx[i] + q, ny[i] + q - 2, 1, 3, SK_MAGENTA);
-        }
+    for (i = 0; i < NINST; i++) {        /* the masses: a glow, a core; the picked one ringed */
+        float en = fm_clampf(eng_env((int)i), 0.0f, 1.0f);
+        uint16_t c = (ui.muted >> i & 1u) ? SK_DIM : INST[i].rgb;
+        sk_disc(nx[i], ny[i], 3.5f + en * 4.0f, 0.0f, c, 60 + (int32_t)(en * 60.0f));
+        sk_disc(nx[i], ny[i], 1.8f + en * 1.4f, 0.0f, c, 256);
+        if ((uint32_t)i == set.sel)
+            sk_disc(nx[i], ny[i], 6.5f + en * 2.0f, 1.0f, C_WHITE, 220);
     }
-    cv_text(130, y + 41, &FONT_XS, WEB_NAME[topo], SK_ACID);
+    cv_text(131, 79, &FONT_T, WEB_NAME[topo], SK_ACID);
 }
 
-/* the six sliders: liquid light running up each groove (faster the harder it moves), a neon thumb where the web has
- * it, the level lit under it */
-static void draw_sliders(int32_t y)
+/* ---- the six instruments: rounded keys, the picked one tinted, a level bar each */
+static void draw_insts(void)
 {
     int32_t i;
-    sk_grunge(0, y, 240, 50);
-    cv_rect(0, y, 240, 1, SK_EDGE);
+    if (!sk_in(98, 26))
+        return;
     for (i = 0; i < NINST; i++) {
-        int32_t x = 9 + i * 38, gx = x + 13, top = y + 4, h = 30, j;
-        float en = eng_energy((int)i);
-        int32_t th = top + h - 6 - (int32_t)(en * (float)(h - 6));
-        int32_t lv = (int32_t)(fm_clampf(eng_env((int)i) * 1.5f, 0.0f, 1.0f) * (float)(h - 2));
+        int32_t x = 4 + i * 39;
         int sel = (uint32_t)i == set.sel, mute = ui.muted >> i & 1u;
+        float en = fm_clampf(eng_env((int)i) * 1.5f, 0.0f, 1.0f);
         uint16_t c = INST[i].rgb;
-        cv_rect(gx - 1, top - 1, 8, h + 2, SK_BG);
-        for (j = 0; j < h; j++) {        /* the liquid: light running up */
-            float w = 0.5f + 0.5f * fm_sinf((float)j * 0.45f + (float)sk_frame * (0.25f + en) + (float)i);
-            int32_t k = mute ? 10 : (int32_t)(w * (j >= h - lv ? 220.0f : 70.0f));
-            cv_rect(gx, top + j, 6, 1, sk_mix(SK_BG, c, k));
-        }
-        sk_panel(x + 4, th - 1, 24, 8, sel ? c : RGB(70, 66, 100), sel ? C_WHITE : SK_EDGE);
-        cv_rect(x + 8, th + 2, 16, 1, sel ? C_WHITE : SK_BG);
-        ctext(x + 16, y + 36, &FONT_XS, INST[i].tag, mute ? SK_EDGE : sel ? C_WHITE : SK_TXT);
+        sk_rrect(x, 98, 36, 26, 4, sel ? sk_mix(SK_PANEL, c, 64) : SK_PANEL,
+                 sel ? c : sk_mix(SK_EDGE, c, mute ? 0 : (int32_t)(en * 160.0f)), 0);
+        ctext(x + 18, 102, &FONT_T, INST[i].name, mute ? SK_DIM : sel ? C_WHITE : SK_TXT);
         if (mute)
-            cv_line(x + 6, y + 47, x + 26, y + 37, SK_MAGENTA);
+            sk_line((float)x + 6.0f, 108.5f, (float)x + 30.0f, 108.5f, SK_MAGENTA, 256);
+        else if (en > 0.02f)
+            sk_rrect(x + 5, 117, 2 + (int32_t)(en * 24.0f), 3, 1, c, c, 0);
     }
 }
 
-/* the four knobs: neon bars on dark cut-corner panels, the sweetspots as ticks, the zone they are on or near */
-static void draw_knobs(int32_t y, uint32_t now)
+/* ---- the four knobs: rings, their sweetspots as beads around them, the value or the zone under them */
+static void draw_knobs(uint32_t now)
 {
     int32_t k;
-    uint16_t col = ui.perf ? SK_MAGENTA : INST_PAGE(ui.page) ? IN.rgb : SK_NEON;
-    sk_grunge(0, y, 240, 44);
+    uint16_t col = INST_PAGE(ui.page) ? IN.rgb : SK_NEON;
+    if (!sk_in(128, 50))
+        return;
     for (k = 0; k < 4; k++) {
         const macro_t *mc = page_knob(k);
-        int32_t x = 4 + k * 59, w = 55, v = knob_val(k), z = zone_at(mc, v), zn = zone_near(mc, v);
-        int32_t fill = (v * (w - 8)) / 127, j;
+        int32_t x = 4 + k * 58, v = knob_val(k), z = zone_at(mc, v), zn = zone_near(mc, v), cx = x + 28, cy = 155;
         int hot = ui.knob_at[k] && now - ui.knob_at[k] < 600u;
         uint32_t i;
+        const char *val;
         char t[8];
-        sk_panel(x, y + 2, w, 40, SK_PANEL, hot ? col : SK_EDGE);
-        cv_text(x + 5, y + 3, &FONT_XS, mc->name, hot ? C_WHITE : SK_TXT);
-        cv_rect(x + 4, y + 18, w - 8, 5, SK_BG);
-        for (j = 0; j < fill; j++)       /* the bar: a gradient, a ripple running through it */
-            cv_rect(x + 4 + j, y + 18, 1, 5,
-                    sk_mix(z >= 0 ? col : sk_mix(col, SK_BG, 120), SK_MAGENTA,
-                           (j * 160) / (w - 8) + (int32_t)(30.0f * fm_sinf((float)j * 0.5f - (float)sk_frame * 0.3f))));
-        for (i = 0; i < mc->nzones; i++)
-            cv_rect(x + 4 + (mc->centre[i] * (w - 8)) / 127, y + 15, 1, 2, (int)i == z ? C_WHITE : SK_EDGE);
-        cv_rect(x + 3 + fill, y + 16, 2, 9, C_WHITE);
-        if (knob_shows_number(k)) {
-            int_text(k == 0 ? v + 60 : v + 1, t);
-            ctext(x + w / 2, y + 26, &FONT_XS, t, z >= 0 || hot ? C_WHITE : SK_TXT);
-        } else if (hot && z < 0) {
-            int_text(v, t);
-            ctext(x + w / 2, y + 26, &FONT_XS, t, C_WHITE);
-        } else {
-            ctext(x + w / 2, y + 26, &FONT_XS, zname(mc, z >= 0 ? z : zn), z >= 0 ? C_WHITE : SK_TXT);
+        sk_panel(x, 128, 56, 50, SK_PANEL, hot ? col : SK_EDGE);
+        ctext(cx, 130, &FONT_T, mc->name, hot ? C_WHITE : SK_DIM);
+        for (i = 0; i < mc->nzones; i++) {   /* the sweetspots: beads just outside the ring */
+            float a = (135.0f + 270.0f * (float)mc->centre[i] / 127.0f) * 0.0174532925f;
+            sk_disc((float)cx + 0.5f + fm_cosf(a) * 14.5f, (float)cy + 0.5f + fm_sinf(a) * 14.5f, 1.0f, 0.0f,
+                    (int)i == z ? C_WHITE : SK_EDGE, 256);
         }
+        sk_ring(cx, cy, 0, v, z >= 0 ? col : sk_mix(col, SK_PANEL, 70));
+        int_text(knob_shows_number(k) ? (k == 0 ? v + 60 : v + 1) : v, t);
+        ctext(cx + 1, cy - 6, &FONT_T, t, hot ? C_WHITE : SK_TXT);
+        if (knob_shows_number(k) || (hot && z < 0))
+            val = t;
+        else
+            val = zname(mc, z >= 0 ? z : zn);
+        ctext(cx, 165, sk_fit(&FONT_XS, val, 52), val, z >= 0 || hot ? C_WHITE : SK_TXT);
     }
 }
 
-/* MASS and CHAOS: two segment meters, acid to magenta */
-static void draw_macros(int32_t y)
+/* ---- MASS and CHAOS: two sliders */
+static void draw_macros(void)
 {
-    int32_t m, i;
-    sk_grunge(0, y, 240, 18);
-    for (m = 0; m < 2; m++) {
-        const macro_t *mc = m ? &CHAOS_KNOB : &MASS_KNOB;
-        int32_t x = 4 + m * 118, v = m ? PT.chaos : PT.mass, segs = (v * 16 + 63) / 127;
-        sk_lcd(x, y + 1, 114, 16);
-        cv_text(x + 5, y + 2, &FONT_XS, mc->name, m ? SK_MAGENTA : SK_ACID);
-        for (i = 0; i < 16; i++)
-            cv_rect(x + 46 + i * 4, y + 5, 3, 8, i < segs ? sk_mix(m ? SK_NEON : SK_ACID, SK_MAGENTA, i * 16) : SK_LCD_GRID);
-    }
-}
-
-/* the playlist: the pattern (and the one queued), then the picked track's steps on the page shown (PERF: the pads) */
-static void draw_playlist(int32_t y, int32_t s)
-{
-    int32_t i, j;
-    char t[40];
-    sk_lcd(2, y, 236, 57);
-    cv_rect(4, y + 2, 232, 14, RGB(40, 10, 50));
-    cv_rect(4, y + 15, 232, 1, SK_MAGENTA);
-    two_digits(set.cur + 1, t);
-    text_cat(t, ". ");
-    text_cat(t, FACTORY[set.cur].name);
-    text_cat(t, " - ");
-    text_cat(t, FACTORY[set.cur].genre);
-    cv_text(8, y + 3, &FONT_XS, t, C_WHITE);
-    int_text(PT.bpm, t);
-    cv_text(232 - text_w(&FONT_XS, t), y + 3, &FONT_XS, t, SK_ACID);
-    if (ui.browse >= 0 || eng_next_pending()) {   /* the next one */
-        int32_t b = ui.browse >= 0 ? ui.browse : set.cur;
-        two_digits(b + 1, t);
-        text_cat(t, ". ");
-        text_cat(t, FACTORY[b].name);
-        cv_text(8, y + 17, &FONT_XS, t, SK_LCD_MID);
-        cv_text(232 - text_w(&FONT_XS, "NEXT"), y + 17, &FONT_XS, "NEXT", (sk_frame & 8u) ? SK_MAGENTA : SK_NEON);
-    } else {
-        int32_t x;
-        if (ui.perf) {                   /* the live FX keys, lit while held */
-            int32_t fx = 70;
-            cv_text(8, y + 17, &FONT_XS, "MUTATE", SK_MAGENTA);
-            for (i = P_GATE; i < NPADS; i++) {
-                int on = ui.pads >> i & 1u;
-                int32_t w = text_w(&FONT_XS, PAD_SHORT[i]) + 4;
-                cv_rect(fx, y + 17, w, 12, on ? SK_NEON : SK_LCD_GRID);
-                cv_text(fx + 2, y + 17, &FONT_XS, PAD_SHORT[i], on ? SK_LCD_BG : SK_LCD_MID);
-                fx += w + 3;
-            }
-            goto steps;
-        }
-        x = cv_text(8, y + 17, &FONT_XS, INST_PAGE(ui.page) ? IN.name : PAGE_NAME[ui.page],
-                    INST_PAGE(ui.page) ? IN.rgb : SK_NEON);
-        if (INST_PAGE(ui.page) && ui.page != PG_SOUND)
-            x = cv_text(x + 6, y + 17, &FONT_XS, PAGE_NAME[ui.page], SK_MAGENTA);
-        if (ui.page == PG_WEB)
-            x = cv_text(x + 6, y + 17, &FONT_XS, IN.tag, IN.rgb);
-        t[0] = 0;
-        int_text(ui.view * 16 + 1, t);
-        text_cat(t, "-");
-        int_text(ui.view * 16 + 16, t + text_len(t));
-        text_cat(t, " / ");
-        int_text(len_steps(), t + text_len(t));
-        cv_text(x + 8, y + 17, &FONT_XS, t, SK_LCD_MID);
-        t[0] = 0;
-        text_cat(t, "CPU ");
-        int_text((int32_t)plat_cpu_pct(), t + 4);
-        text_cat(t, "%");
-        cv_text(232 - text_w(&FONT_XS, t), y + 17, &FONT_XS, t, plat_cpu_pct() > 80u ? SK_MAGENTA : SK_LCD_LO);
-    }
-steps:
-    if (ui.perf) {                       /* PERF: the sixteen pads, held ones lit */
-        for (i = 0; i < 16; i++) {
-            int32_t x = 6 + (i % 8) * 29, yy = y + 30 + (i / 8) * 13;
-            int on = ui.pads >> i & 1u;
-            cv_rect(x, yy, 27, 12, on ? (i == P_COLLAPSE ? SK_MAGENTA : SK_NEON) : SK_LCD_GRID);
-            ctext(x + 14, yy, &FONT_XS, PAD_SHORT[i], on ? SK_LCD_BG : i == P_COLLAPSE ? SK_MAGENTA : SK_LCD_MID);
-        }
+    int32_t m;
+    if (!sk_in(178, 14))
         return;
+    for (m = 0; m < 2; m++) {
+        int32_t x = 4 + m * 118, v = m ? PT.chaos : PT.mass, w = (v * 70) / 127;
+        uint16_t c = m ? SK_MAGENTA : SK_NEON;
+        cv_text(x + 2, 179, &FONT_XS, m ? "CHAOS" : "MASS", SK_TXT);
+        sk_rrect(x + 42, 182, 72, 5, 2, SK_TRACK, SK_TRACK, 0);
+        sk_rrect(x + 42, 182, w + 2, 5, 2, c, c, 0);
+        sk_disc((float)(x + 43 + w), 184.5f, 4.5f, 0.0f, c, 90);
+        sk_disc((float)(x + 43 + w), 184.5f, 3.2f, 0.0f, C_WHITE, 256);
     }
-    for (i = 0; i < 16; i++) {           /* the steps: accents full, hits half, the others' hits as dots */
-        int32_t st = i + 16 * ui.view, x = 6 + i * 14 + (i / 4) * 1, yy = y + 32, mx = x + 1;
+}
+
+/* ---- the steps of the picked track on the page shown: accents tall, hits short, the others' hits as dots */
+static void draw_steps(int32_t s)
+{
+    int32_t i, j, x;
+    char t[24];
+    if (!sk_in(194, 42))
+        return;
+    sk_panel(4, 194, 232, 42, SK_DEEP, SK_EDGE);
+    x = cv_text(10, 196, &FONT_T, INST_PAGE(ui.page) ? IN.name : PAGE_NAME[ui.page], INST_PAGE(ui.page) ? IN.rgb : SK_NEON);
+    if (INST_PAGE(ui.page) && ui.page != PG_SOUND)
+        x = cv_text(x + 5, 196, &FONT_T, PAGE_NAME[ui.page], SK_MAGENTA);
+    if (ui.page == PG_WEB)
+        x = cv_text(x + 5, 196, &FONT_T, IN.name, IN.rgb);
+    t[0] = 0;
+    int_text(ui.view * 16 + 1, t);
+    text_cat(t, "-");
+    int_text(ui.view * 16 + 16, t + text_len(t));
+    text_cat(t, " / ");
+    int_text(len_steps(), t + text_len(t));
+    cv_text(x + 6, 196, &FONT_T, t, SK_TXT);
+    t[0] = 0;
+    text_cat(t, "CPU ");
+    int_text((int32_t)plat_cpu_pct(), t + 4);
+    text_cat(t, "%");
+    cv_text(230 - text_w(&FONT_T, t), 196, &FONT_T, t, plat_cpu_pct() > 80u ? SK_MAGENTA : SK_DIM);
+    for (i = 1; i < 4; i++)
+        cv_rect(7 + i * 56, 210, 1, 17, SK_EDGE);
+    for (i = 0; i < 16; i++) {
+        int32_t st = i + 16 * ui.view, sx = 9 + i * 14, mx = sx + 1;
         int on, acc;
-        if (st >= len_steps()) {
-            cv_rect(x, yy, 12, 13, SK_LCD_GRID);
-            cv_line(x, yy + 12, x + 11, yy, SK_LCD_SCAN);
+        if (st >= len_steps()) {         /* past the track's length */
+            sk_rrect(sx, 215, 11, 12, 2, SK_DEEP, SK_OFF, 0);
             continue;
         }
         on = step_on(&TR, st);
         acc = on && step_acc(&TR, st);
-        cv_rect(x, yy, 12, 13, acc ? IN.rgb : on ? sk_dim(IN.rgb) : SK_LCD_GRID);
         if (acc)
-            cv_rect(x + 2, yy + 2, 8, 2, C_WHITE);
+            sk_rrect(sx, 209, 11, 18, 2, IN.rgb, IN.rgb, 0);
+        else
+            sk_rrect(sx, 215, 11, 12, 2, on ? sk_mix(SK_OFF, IN.rgb, 190) : SK_OFF, on ? sk_mix(SK_OFF, IN.rgb, 190) : SK_OFF, 0);
         for (j = 0; j < NINST; j++)
-            if ((uint32_t)j != set.sel && step_on(&PT.tr[j], st % PT.tr[j].len) && mx < x + 11) {
-                cv_rect(mx, yy + 15, 2, 2, (ui.muted >> j & 1u) ? SK_LCD_LO : INST[j].rgb);
+            if ((uint32_t)j != set.sel && step_on(&PT.tr[j], st % PT.tr[j].len) && mx < sx + 10) {
+                cv_rect(mx, 229, 2, 2, (ui.muted >> j & 1u) ? SK_DIM : INST[j].rgb);
                 mx += 2;
             }
-        if (st == s) {
-            cv_rect(x - 1, yy - 1, 14, 1, SK_MAGENTA);
-            cv_rect(x, yy + 19, 12, 3, SK_MAGENTA);
-        } else if (i % 4 == 0) {
-            cv_rect(x, yy + 19, 2, 2, SK_LCD_LO);
+        if (st == s)
+            sk_rrect(sx - 2, 206, 15, 24, 3, 0, C_WHITE, SK_HOLLOW);
+    }
+}
+
+/* ---- PERF: the sixteen pads, MUTATE's four rings, the live keys and the pattern */
+static void draw_perf(void)
+{
+    static const uint16_t MCOL[4] = {SK_ACID, SK_MAGENTA, SK_NEON, SK_PURPLE};
+    int32_t i, x;
+    char t[24];
+    if (sk_in(22, 98))
+        for (i = 0; i < 16; i++) {
+            int32_t px = 4 + (i % 4) * 58, py = 22 + (i / 4) * 25;
+            int on = ui.pads >> i & 1u;
+            uint16_t c = i == P_COLLAPSE ? SK_MAGENTA : SK_NEON;
+            const char *n = text_w(&FONT_T, PAD_NAME[i]) <= 52 ? PAD_NAME[i] : PAD_SHORT[i];
+            sk_rrect(px, py, 56, 22, 4, on ? sk_mix(SK_PANEL, c, 90) : SK_PANEL, on ? c : SK_EDGE, 0);
+            ctext(px + 28, py + 4, sk_fit(&FONT_XS, n, 52), n, on ? C_WHITE : i == P_COLLAPSE ? SK_MAGENTA : SK_TXT);
         }
+    if (sk_in(124, 72))
+        for (i = 0; i < 4; i++) {
+            const macro_t *mc = &MUTATE_KNOB[i];
+            int32_t px = 4 + i * 58, v = ui.mut[i], z = zone_at(mc, v), zn = zone_near(mc, v);
+            const char *zn_s = zname(mc, z >= 0 ? z : zn);
+            sk_panel(px, 124, 56, 72, SK_PANEL, v ? MCOL[i] : SK_EDGE);
+            ctext(px + 28, 127, &FONT_T, mc->name, v ? C_WHITE : SK_DIM);
+            sk_ring(px + 28, 159, 1, v, MCOL[i]);
+            int_text(v, t);
+            ctext(px + 29, 151, &FONT_B, t, C_WHITE);
+            ctext(px + 28, 180, sk_fit(&FONT_XS, zn_s, 52), zn_s, v ? C_WHITE : SK_TXT);
+        }
+    if (!sk_in(200, 36))
+        return;
+    sk_panel(4, 200, 232, 36, SK_DEEP, SK_EDGE);
+    x = 10;
+    for (i = P_GATE; i < NPADS; i++) {   /* the live keys, lit while held */
+        int on = ui.pads >> i & 1u;
+        int32_t w = text_w(&FONT_T, PAD_SHORT[i]) + 10;
+        sk_rrect(x, 204, w, 13, 3, on ? SK_NEON : SK_OFF, on ? SK_NEON : SK_EDGE, 0);
+        cv_text(x + 5, 204, &FONT_T, PAD_SHORT[i], on ? SK_DEEP : SK_TXT);
+        x += w + 4;
+    }
+    {
+        int next = ui.browse >= 0 || eng_next_pending(), pat = ui.browse >= 0 ? ui.browse : set.cur;
+        two_digits(pat + 1, t);
+        text_cat(t, " ");
+        text_cat(t, FACTORY[pat].name);
+        x = cv_text(10, 219, &FONT_XS, t, next ? SK_MAGENTA : C_WHITE);
+        if (next && (sk_frame & 8u))
+            cv_text(x + 6, 220, &FONT_T, "NEXT", SK_MAGENTA);
+        int_text(PT.bpm, t);
+        text_cat(t, " BPM");
+        cv_text(230 - text_w(&FONT_XS, t), 219, &FONT_XS, t, SK_ACID);
     }
 }
 
 static void draw(uint32_t now)
 {
-    int32_t s = eng_track_step(set.sel);
+    int32_t s = eng_track_step(set.sel), band;
     sk_frame++;
-    sk_tearing = eng_env(I_KICK) > 0.55f ? 2 : 0;   /* a hard kick: the screen tears */
+    sk_tearing = eng_env(I_KICK) > 0.6f ? 2 : 0;   /* a hard kick: the screen tears */
     if (ui.pads >> P_COLLAPSE & 1u)
-        sk_tearing = 6;
-    cv_begin(240, 120, SK_BG);
-    draw_title(now);
-    sk_grunge(0, 15, 240, 2);
-    sk_grunge(0, 15, 4, 56);
-    sk_grunge(122, 15, 2, 56);
-    sk_grunge(236, 15, 4, 56);
-    sk_grunge(0, 68, 240, 2);
-    draw_time(17, now);
-    draw_web(17);
-    draw_sliders(70);
-    sk_tear();
-    cv_blit(0, 0);
-    cv_begin(240, 120, SK_BG);
-    draw_knobs(0, now);
-    draw_macros(44);
-    sk_grunge(0, 62, 240, 1);
-    draw_playlist(63, s);
-    sk_tear();
-    cv_blit(0, 120);
+        sk_tearing = 5;
+    for (band = 0; band < 2; band++) {
+        cv_begin(240, 120, SK_BG);
+        cv_oy = -120 * band;             /* the whole screen's coordinates; this band's rows kept */
+        sk_backdrop();
+        draw_status(now);
+        if (ui.perf) {
+            draw_perf();
+        } else {
+            draw_hero(now);
+            draw_web();
+            draw_insts();
+            draw_knobs(now);
+            draw_macros();
+            draw_steps(s);
+        }
+        sk_tear();
+        cv_blit(0, (uint32_t)(120 * band));
+    }
     ui.drawn_at = now;
 }
 
@@ -1383,7 +1590,9 @@ static void draw_logo(int lit)          /* the name over a neon horizon; lit: ho
     for (i = 0; i < NINST; i++) {
         int on = i < lit;
         int32_t x = 120 + (on ? HEX_X[i] / 3 : HEX_X[i] * 2), yy = on ? 30 + HEX_Y[i] / 3 : 30 + HEX_Y[i];
-        cv_rect(x - 3, yy - 3, 7, 7, on ? INST[i].rgb : RGB(40, 40, 70));
+        if (on)
+            sk_disc((float)x + 0.5f, (float)yy + 0.5f, 7.0f, 0.0f, INST[i].rgb, 70);
+        sk_disc((float)x + 0.5f, (float)yy + 0.5f, 3.5f, 0.0f, on ? INST[i].rgb : RGB(40, 40, 70), 256);
     }
     ctext(120, 100, &FONT_XS, "by swtdr34mz", RGB(170, 160, 210));
     cv_blit(0, 120);
@@ -1392,7 +1601,7 @@ static void draw_logo(int lit)          /* the name over a neon horizon; lit: ho
 void app_splash(void)
 {
     lcd_fill(0, 0, 240, 240, SK_BG);
-    sk_grain_init();
+    sk_init();
     draw_logo(0);
 }
 
@@ -1454,7 +1663,7 @@ void app_panic(void)
 
 void app_ui_init(void)
 {
-    sk_grain_init();
+    sk_init();
     ui.browse = -1;
     ui.step_drawn = -2;
     ui.redraw = 1;

@@ -12,6 +12,7 @@
 #define APP_SPLASH                       /* app_splash: the chrome logo, not the platform's page */
 #define APP_TICK                         /* app_tick: MIDI in (clock, Start, Stop), at 1 kHz */
 void app_tick(void);
+#define APP_BATTERY_RAW                  /* plat_battery_charging: the bolt in the status bar */
 #define APP_OVERLOAD                     /* app_overload: the render ran late: shed the quietest work for a moment */
 void app_overload(void);
 #define APP_BLOCK 128u                   /* frames per audio block: 2.9 ms at 44.1 kHz (a drum machine: tight) */
